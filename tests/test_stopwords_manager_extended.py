@@ -84,8 +84,7 @@ class TestLoadStopwords:
         builtin_dir.mkdir()
         hit_file = builtin_dir / "stopwords_hit.txt"
         hit_file.write_text(
-            "的\n# 这是注释\n\n是\n  \n# 另一个注释\n在\n",
-            encoding="utf-8"
+            "的\n# 这是注释\n\n是\n  \n# 另一个注释\n在\n", encoding="utf-8"
         )
 
         manager.builtin_stopwords_dir = builtin_dir
@@ -147,8 +146,7 @@ class TestLoadStopwords:
 
         custom_words = ["额外1", "额外2", "额外3"]
         stopwords = await manager.load_stopwords(
-            source="hit",
-            custom_words=custom_words
+            source="hit", custom_words=custom_words
         )
 
         assert "的" in stopwords

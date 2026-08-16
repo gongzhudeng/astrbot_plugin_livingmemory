@@ -13,6 +13,7 @@ import aiosqlite
 from astrbot.api import logger
 
 from ..core.models.conversation_models import Message, Session, serialize_to_json
+from .sqlite_utils import open_sqlite_connection
 
 
 class ConversationStore:
@@ -41,11 +42,11 @@ class ConversationStore:
 
     async def initialize(self) -> None:
         """初始化数据库连接并创建表结构"""
-        self.connection = await aiosqlite.connect(self.db_path)
+        self.connection = await open_sqlite_connection(
+            self.db_path, journal_mode="WAL"
+        )
         if self.connection is not None:
             self.connection.row_factory = aiosqlite.Row
-            await self.connection.execute("PRAGMA journal_mode = WAL")
-            await self.connection.execute("PRAGMA busy_timeout = 10000")
 
         await self._create_tables()
         await self._create_indexes()
@@ -508,7 +509,7 @@ class ConversationStore:
                        group_id, platform, timestamp, metadata
                 FROM messages
                 WHERE session_id = ? AND sender_id = ?
-                ORDER BY timestamp DESC
+                ORDER BY timestamp DESC, id DESC
                 LIMIT ?
             """
             params = (session_id, sender_id, limit)
@@ -519,7 +520,7 @@ class ConversationStore:
                        group_id, platform, timestamp, metadata
                 FROM messages
                 WHERE session_id = ?
-                ORDER BY timestamp DESC
+                ORDER BY timestamp DESC, id DESC
                 LIMIT ?
             """
             params = (session_id, limit)
@@ -806,7 +807,7 @@ class ConversationStore:
                    group_id, platform, timestamp, metadata
             FROM messages
             WHERE session_id = ? AND content LIKE ?
-            ORDER BY timestamp DESC
+            ORDER BY timestamp DESC, id DESC
             LIMIT ?
         """,
             (session_id, f"%{keyword}%", limit),
@@ -857,7 +858,7 @@ class ConversationStore:
                    group_id, platform, timestamp, metadata
             FROM messages
             WHERE session_id = ?
-            ORDER BY timestamp ASC
+            ORDER BY timestamp ASC, id ASC
             LIMIT ? OFFSET ?
         """
 

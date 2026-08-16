@@ -427,3 +427,35 @@ async def test_complete_initialization_skips_graph_db_when_disabled(
     assert init.memory_engine.graph_vector_db is None
     assert init.memory_engine.config["graph_memory_enabled"] is False
     init._check_and_fix_dimension_mismatch.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_teardown_closes_owned_resources_once(initializer):
+    scheduler = Mock(stop=AsyncMock())
+    conversation_store = Mock(close=AsyncMock())
+    memory_engine = Mock(close=AsyncMock())
+    graph_db = Mock(close=AsyncMock())
+    db = Mock(close=AsyncMock())
+
+    initializer.decay_scheduler = scheduler
+    initializer.conversation_manager = Mock(store=conversation_store)
+    initializer.memory_engine = memory_engine
+    initializer.graph_db = graph_db
+    initializer.db = db
+    initializer.embedding_provider = object()
+    initializer.llm_provider = object()
+    initializer._providers_ready = True
+    initializer._initialization_complete = True
+
+    await initializer.teardown()
+    await initializer.teardown()
+
+    scheduler.stop.assert_awaited_once()
+    conversation_store.close.assert_awaited_once()
+    memory_engine.close.assert_awaited_once()
+    graph_db.close.assert_awaited_once()
+    db.close.assert_awaited_once()
+    assert initializer.memory_engine is None
+    assert initializer.graph_db is None
+    assert initializer.db is None
+    assert initializer.is_initialized is False

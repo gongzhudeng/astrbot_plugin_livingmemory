@@ -125,7 +125,12 @@ async def test_recall_reflection_and_search_workflow(setup_bundle):
 
     assert memory_engine.search_memories.await_count == 1
 
-    resp = Mock(role="assistant", completion_text="助手回复", tools_call_name=None, tools_call_extra_content=None)
+    resp = Mock(
+        role="assistant",
+        completion_text="助手回复",
+        tools_call_name=None,
+        tools_call_extra_content=None,
+    )
     with patch(
         "astrbot_plugin_livingmemory.core.event_handler_modules.memory_reflection.get_persona_id",
         new_callable=AsyncMock,

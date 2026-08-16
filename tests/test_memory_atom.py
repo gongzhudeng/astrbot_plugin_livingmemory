@@ -809,7 +809,9 @@ def test_graph_extractor_atoms_no_entities_fallback() -> None:
 
 def test_classify_atoms_from_metadata_default_config() -> None:
     """MemoryProcessor initializes atom config for direct construction."""
-    from astrbot_plugin_livingmemory.core.processors.memory_processor import MemoryProcessor
+    from astrbot_plugin_livingmemory.core.processors.memory_processor import (
+        MemoryProcessor,
+    )
 
     processor = MemoryProcessor()
     atoms = processor.classify_atoms_from_metadata(metadata={"key_facts": []})
@@ -830,7 +832,9 @@ def test_classify_atoms_from_metadata_atom_disabled() -> None:
 
 
 def test_classify_atoms_from_metadata_atom_enabled_returns_atoms() -> None:
-    from astrbot_plugin_livingmemory.core.processors.memory_processor import MemoryProcessor
+    from astrbot_plugin_livingmemory.core.processors.memory_processor import (
+        MemoryProcessor,
+    )
 
     processor = MemoryProcessor(config={"atom_enabled": True})
     atoms = processor.classify_atoms_from_metadata(

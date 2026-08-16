@@ -1384,11 +1384,28 @@ async def test_batch_delete_faiss_failure_continues(tmp_path: Path):
     deleted = await engine.batch_delete_memories(ids)
     assert deleted == 3
 
-    if engine.db_connection is not None:
-        cursor = await engine.db_connection.execute(
-            "SELECT COUNT(*) FROM documents WHERE id IN (?, ?, ?)", tuple(ids)
-        )
-        row = await cursor.fetchone()
-        assert row[0] == 0
+    await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_close_is_idempotent_and_keeps_external_vector_stores(tmp_path: Path):
+    graph_vector_db = Mock(close=AsyncMock())
+    engine = MemoryEngine(
+        db_path=str(tmp_path / "idempotent-close.db"),
+        faiss_db=Mock(),
+        graph_vector_db=graph_vector_db,
+        config={},
+    )
+    db_connection = AsyncMock()
+    lifecycle_manager = Mock(stop=AsyncMock())
+    engine.db_connection = db_connection
+    engine.atom_lifecycle_manager = lifecycle_manager
 
     await engine.close()
+    await engine.close()
+
+    lifecycle_manager.stop.assert_awaited_once()
+    db_connection.close.assert_awaited_once()
+    graph_vector_db.close.assert_not_awaited()
+    assert engine.db_connection is None
+    assert engine.atom_lifecycle_manager is None

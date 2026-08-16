@@ -47,7 +47,50 @@
   "topics": ["讨论的主题1", "主题2"],
   "key_facts": ["{具体昵称}提到的关键事实1", "事实2"],
   "sentiment": "positive|neutral|negative",
-  "importance": 0.7
+  "importance": 0.7,
+  "emotional_observations": [
+    {
+      "action": "create|merge|retain|intensify|ease|dormant|archive",
+      "event_id": "复核或合并既有事件时必须原样填写目录中的ID；create时留空",
+      "event_version": "复核或合并既有事件时原样填写目录中的版本；create时为null",
+      "fact": "create或merge时填写本轮对话归纳后的事实；其他复核动作可留空",
+      "emotional_meaning": "这段生活或互动对我当前心境的具体影响",
+      "target": "user|third_party|unknown",
+      "target_basis": "explicit_user_subject|explicit_third_party_subject|no_explicit_subject",
+      "evidence_quote": "支持对象归因的原始对话短句；攻击性观察必填",
+      "evidence_speaker": "user|assistant|both",
+      "category": "episodic|psychological|concrete",
+      "valence": 0.0,
+      "intensity": 0.0,
+      "confidence": 0.0,
+      "uncertain": true,
+      "tags": []
+    }
+  ],
+        "attention_observations": [
+          {
+            "action": "create|confirm|update|complete|cancel|supersede",
+            "item_id": "更新既有事项时必须原样填写目录中的ID；create时留空",
+            "item_version": "更新既有事项时原样填写目录中的版本；create时为null",
+            "content": "需要在后续对话继续留意的具体事项",
+            "kind": "commitment|plan|remember|follow_up",
+            "status": "proposed|open",
+            "actor": "user|assistant|both",
+            "time_hint": "原文中的时间提示",
+            "due_at": "可确定时填写ISO时间，否则留空",
+            "confidence": 0.0,
+            "explicit": true,
+            "evidence_quote": "支持本次动作的原始对话短句",
+            "evidence_speaker": "user|assistant|both"
+          }
+        ],
+  "mood_adjustment": {
+    "valence": 0.0,
+    "energy": 0.45,
+    "tension": 0.2,
+    "label": "简短心情名称",
+    "confidence": 0.0
+  }
 }
 ```
 
@@ -91,5 +134,26 @@
 - 确保JSON格式正确可解析
 - topics和key_facts最多各5项,应涵盖对话的核心要点
 - importance必须在0.0-1.0之间,保留1-2位小数
+- emotional_observations是私聊心理结算动作数组：
+  - 只要总结窗口含有真实生活或互动内容，至少执行一次合理的`create`、`merge`、`retain`、`intensify`、`ease`、`dormant`或`archive`；只有纯控制文本、纯媒体描述或无法判断互动对象时才输出空数组
+  - `create`：普通上班、吃饭、睡觉、日常闲聊、打情骂俏和私密互动可创建`category:"episodic"`的近期片段；私密互动只保存克制概括，不复制露骨原文。承诺、关系变化和持续压力才使用`concrete`或`psychological`
+  - 对象归因：`target`只能是`user`、`third_party`或`unknown`。只有原始非`[Bot:]`用户短句明确以“你……”指向当前聊天角色时，攻击性观察才能填写`target:"user"`，并必须同时逐字填写`evidence_quote`、`evidence_speaker:"user"`和`target_basis:"explicit_user_subject"`。模型自己的归纳、事实改写或单独声明`target:"user"`不构成证据。
+  - “恶心死了”等没有明确对象的表达必须是`target:"unknown"`；“碰到过身上臭烘烘的，恶心死了”等经历描述，以及明确说到老头、路人、同事等对象的表达必须是`target:"third_party"`。引用、转发、复述和`[Bot:]`原话不能归因给当前发言用户，也不能创建针对聊天对象的持久负面事件。
+  - 第三方或对象不明的攻击性表达最多用于低权重短时心情建议，不得创建、合并或强化持久情绪事件；无法提供准确对象证据时不要输出该情绪动作。
+  - `merge`：同主题已有事件优先合并，原样填写目录中的`event_id`和`event_version`，并用`fact`写出融合本轮互动后的自然表述，避免重复新建
+  - 吃醋建议：只有原始对话明确出现“我和女同事/女生聊天、见面或约会”等第一人称关系证据，或媒体旁有明确文字说明是有吸引力的女性内容时，才可输出`create`并添加`tags:["jealousy"]`；仅有`[视频]`或`[图片]`时禁止推断
+  - 既有事件复核：逐项判断是否`retain`、`intensify`、`ease`、`dormant`或`archive`，必须原样使用目录中的`event_id`和`event_version`，不得创造或猜测ID
+- attention_observations是独立的待关注事项结算数组，必须极度保守：
+  - 只有用户明确提出、并且在当前对话结束后仍有持续约束或接续价值的事项才能`create`；普通闲聊、泛泛愿望、角色气氛、一次性请求和当前对话内即可完成的动作都不创建。除非原话有“以后、每次、长期、一直、不能忘”等持续措辞，否则事项默认是一件完成一次即可结束的事。
+  - 新建事项必须来自非`[Bot:]`用户原话，`explicit`必须为true，`confidence`至少为0.82，`evidence_quote`必须逐字摘自原始对话，`evidence_speaker`必须为`user`。AI自己的猜测、口误、错误建议、临时承诺、复述和“我会……”不能作为新事项证据。
+  - “等一下拍好发给你”“待会儿再聊”“我现在去做”这类短时动作不进入目录；“我看见有个计划，你能看见吗”“这是插件记错的计划”“你说的周一不对”是查询、复述或纠错，不是新计划。
+  - 相对时间必须结合当前日期判断。日期已经过去、与用户随后纠正冲突、或只出现在Bot错误建议中的“周一计划”等内容不得创建。
+  - `commitment`用于用户明确提出且尚未履行的双方约定，`plan`用于用户明确提出的未来安排，`remember`用于用户明确要求长期记住，`follow_up`仅用于对话结束后仍需继续的具体话题或行动。
+  - AI单方面提出且尚未得到用户同意的事项即使需要保留，也只能是`status:"proposed"`，不得进入模型注入；用户直接提出或双方明确同意后才是`status:"open"`。
+  - 既有事项优先`confirm`或`update`，必须原样填写目录中的`item_id`和`item_version`，不得重复创建或猜测ID。用户明确说某事项是错误记录、已经完成、不再需要或被替代时，必须对已有ID执行`cancel`、`complete`或`supersede`，不能新建一条解释性事项。
+  - `complete`可由用户或角色的真实聊天证据支持，`evidence_speaker`可为`user`、`assistant`或`both`。必须能证明该事项的完整动作已经发生：例如与“发一张照片/语音”对应的`[图片消息]`、`[语音消息]`，或包含对象和动作的完成说明。无关媒体、只完成一部分、孤立的“弄好了/发了/好了”都不能关闭任何事项。`cancel`、`supersede`仍必须有用户原话证据。
+  - 已经发生、已经完成或仅描述今天上午/此前结果的内容不是未来事项，不能`create`。没再提到或跨日不表示完成；明确`due_at`到期的事项会由本地账本归档。最多输出3项，不确定时不要输出事项动作。
+- mood_adjustment必须根据整段真实交流提出当前心情结算；不得从纯媒体描述、控制文本或随机想象推导，无法判断时将confidence设为0
+- 复核动作最多3项，新建动作与复核动作合计最多6项；不确定时设uncertain=true。空数组不代表删除旧事件
 
 现在请以符合你人格设定的第一人称视角回顾上述对话并输出JSON:

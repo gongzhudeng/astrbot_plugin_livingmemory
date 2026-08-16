@@ -8,8 +8,10 @@
 
 import json
 import time
+from contextlib import asynccontextmanager
 
 import aiosqlite
+import astrbot_plugin_livingmemory.storage.db_migration as db_migration_mod
 import pytest
 from astrbot_plugin_livingmemory.core.utils import format_memories_for_injection
 from astrbot_plugin_livingmemory.storage.db_migration import DBMigration
@@ -578,6 +580,87 @@ async def test_migrate_v7_to_v8_creates_write_ops_and_access_metadata(tmp_path):
         row = await cursor.fetchone()
 
     assert json.loads(row[0])["access_count"] == 0
+
+
+class _IntegrityCursor:
+    def __init__(self, rows):
+        self._rows = rows
+
+    async def fetchall(self):
+        return [(row,) for row in self._rows]
+
+
+class _IntegrityDb:
+    def __init__(self, integrity_results):
+        self._integrity_results = list(integrity_results)
+        self.executed = []
+        self.commit_count = 0
+        self.rollback_count = 0
+
+    async def execute(self, sql, *args):
+        del args
+        statement = " ".join(sql.split())
+        self.executed.append(statement)
+        if statement == "PRAGMA integrity_check":
+            return _IntegrityCursor(self._integrity_results.pop(0))
+        return _IntegrityCursor([])
+
+    async def commit(self):
+        self.commit_count += 1
+
+    async def rollback(self):
+        self.rollback_count += 1
+
+
+@pytest.mark.asyncio
+async def test_integrity_check_repairs_only_known_document_index(monkeypatch, tmp_path):
+    db_path = tmp_path / "repair-known-index.db"
+    db_path.write_bytes(b"sqlite-placeholder")
+    db = _IntegrityDb(
+        [
+            ["row 7 missing from index idx_doc_last_access_metadata"],
+            ["ok"],
+        ]
+    )
+
+    @asynccontextmanager
+    async def fake_connection(path):
+        assert str(path) == str(db_path)
+        yield db
+
+    monkeypatch.setattr(db_migration_mod, "sqlite_connection", fake_connection)
+
+    repaired = await DBMigration(str(db_path)).validate_and_repair_known_indexes()
+
+    assert repaired == ["idx_doc_last_access_metadata"]
+    assert 'DROP INDEX IF EXISTS "idx_doc_last_access_metadata"' in db.executed
+    assert (
+        DBMigration.REBUILDABLE_DOCUMENT_INDEXES["idx_doc_last_access_metadata"]
+        in db.executed
+    )
+    assert not any("idx_doc_metadata" in sql for sql in db.executed)
+    assert db.commit_count == 1
+    assert db.rollback_count == 0
+
+
+@pytest.mark.asyncio
+async def test_integrity_check_rejects_unknown_corruption(monkeypatch, tmp_path):
+    db_path = tmp_path / "reject-unknown-index.db"
+    db_path.write_bytes(b"sqlite-placeholder")
+    db = _IntegrityDb([["wrong # of entries in index idx_unknown"]])
+
+    @asynccontextmanager
+    async def fake_connection(path):
+        assert str(path) == str(db_path)
+        yield db
+
+    monkeypatch.setattr(db_migration_mod, "sqlite_connection", fake_connection)
+
+    with pytest.raises(RuntimeError, match="不可自动修复"):
+        await DBMigration(str(db_path)).validate_and_repair_known_indexes()
+
+    assert not any(sql.startswith("DROP INDEX") for sql in db.executed)
+    assert db.commit_count == 0
 
 
 # ===========================================================================

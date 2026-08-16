@@ -382,14 +382,29 @@ class MemoryReflection:
                     logger.info(
                         f"[{session_id}] 调用 MemoryProcessor 处理 {len(history_messages)} 条消息"
                     )
+                    review_context: dict[str, Any] = {}
+                    review_callback = getattr(
+                        self.context, "_emotion_state_review_context", None
+                    )
+                    if callable(review_callback) and not is_group_chat:
+                        review_result = review_callback(session_id)
+                        if asyncio.iscoroutine(review_result):
+                            review_result = await review_result
+                        if isinstance(review_result, dict):
+                            review_context = review_result
+                    process_kwargs = {
+                        "messages": history_messages,
+                        "is_group_chat": is_group_chat,
+                        "persona_id": persona_id,
+                    }
+                    if review_context:
+                        process_kwargs["emotion_review_context"] = review_context
                     (
                         content,
                         metadata,
                         importance,
                     ) = await self.memory_processor.process_conversation(
-                        messages=history_messages,
-                        is_group_chat=is_group_chat,
-                        persona_id=persona_id,
+                        **process_kwargs
                     )
 
                     atoms = self.memory_processor.classify_atoms_from_metadata(
@@ -406,6 +421,13 @@ class MemoryReflection:
                         "end_index": end_index,
                         "message_count": end_index - start_index,
                     }
+                    if review_context:
+                        metadata["emotion_review_state_version"] = review_context.get(
+                            "state_version"
+                        )
+                        metadata["emotion_review_message_watermark"] = (
+                            review_context.get("message_watermark")
+                        )
 
                     logger.info(
                         f"[{session_id}] 已使用LLM生成结构化记忆, "
@@ -426,7 +448,7 @@ class MemoryReflection:
 
                 # 正常流程：添加到记忆引擎
                 if self.memory_engine:
-                    await self.memory_engine.add_memory(
+                    memory_id = await self.memory_engine.add_memory(
                         content=content,
                         session_id=session_id,
                         persona_id=persona_id,
@@ -438,6 +460,14 @@ class MemoryReflection:
                     logger.info(
                         f"[{session_id}] 成功存储对话记忆（{len(history_messages)}条消息，重要性={importance:.2f}）"
                     )
+                    if not is_group_chat:
+                        await self._notify_emotion_observer(
+                            session_id,
+                            metadata,
+                            start_index,
+                            end_index,
+                            memory_id=memory_id,
+                        )
 
                 # 成功：更新已总结的位置，清除待处理记录
                 if self.conversation_manager:
@@ -478,6 +508,57 @@ class MemoryReflection:
                 await self._record_pending_summary(
                     session_id, start_index, end_index, retry_count
                 )
+
+    async def _notify_emotion_observer(
+        self,
+        session_id: str,
+        metadata: dict[str, Any],
+        start_index: int,
+        end_index: int,
+        memory_id: int | None = None,
+    ) -> None:
+        """Notify an optional emotion plugin without coupling memory persistence."""
+        callback = getattr(self.context, "_emotion_state_memory_summary", None)
+        if not callable(callback):
+            return
+        summary_id = f"{session_id[:120]}:{memory_id}" if memory_id is not None else ""
+        payload = {
+            "session_id": session_id,
+            "summary_id": summary_id,
+            "memory_id": memory_id,
+            "start_index": start_index,
+            "end_index": end_index,
+            "summary": str(metadata.get("persona_summary", ""))[:1200],
+            "emotional_observations": metadata.get("emotional_observations", []),
+            "attention_observations": metadata.get("attention_observations", []),
+            "mood_adjustment": metadata.get("mood_adjustment", {}),
+            "emotion_source_has_text": bool(
+                metadata.get("emotion_source_has_text", True)
+            ),
+            "emotion_review_state_version": metadata.get(
+                "emotion_review_state_version"
+            ),
+            "emotion_review_message_watermark": metadata.get(
+                "emotion_review_message_watermark"
+            ),
+        }
+        try:
+            result = callback(payload)
+            if asyncio.iscoroutine(result):
+                result = await result
+            if isinstance(result, dict):
+                logger.info(
+                    "[%s] 情绪总结回调完成: summary_id=%s, status=%s",
+                    session_id,
+                    summary_id or "legacy",
+                    result.get("status", "unknown"),
+                )
+        except Exception as exc:
+            logger.warning(
+                "[%s] 情绪观察回调失败，记忆存储保持成功状态: %s",
+                session_id,
+                exc,
+            )
 
     async def _record_pending_summary(
         self,

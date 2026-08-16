@@ -74,6 +74,22 @@ def test_message_image_only_content_uses_placeholder():
     assert msg.to_dict()["content"] == "[图片消息]"
 
 
+def test_message_voice_record_content_uses_voice_placeholder():
+    msg = Message(
+        id=1,
+        session_id="s1",
+        role="assistant",
+        content=[{"type": "record", "file": "voice.amr"}],
+        sender_id="bot",
+        group_id=None,
+        platform="test",
+        metadata={"is_bot_message": True},
+    )
+
+    assert msg.format_for_llm(include_sender_name=True)["content"] == "[语音消息]"
+    assert msg.to_dict()["content"] == "[语音消息]"
+
+
 def test_session_and_memory_event_helpers():
     session = Session(
         id=1,

@@ -12,12 +12,35 @@ import aiosqlite
 
 from astrbot.api import logger
 
+from .sqlite_utils import sqlite_connection
+
 
 class DBMigration:
     """数据库迁移管理器"""
 
     # 当前数据库版本
     CURRENT_VERSION = 8
+    REBUILDABLE_DOCUMENT_INDEXES = {
+        "idx_doc_metadata": (
+            "CREATE INDEX idx_doc_metadata "
+            "ON documents(json_extract(metadata, '$.session_id'))"
+        ),
+        "idx_doc_persona_metadata": (
+            "CREATE INDEX idx_doc_persona_metadata "
+            "ON documents(json_extract(metadata, '$.persona_id'))"
+        ),
+        "idx_doc_importance_metadata": (
+            "CREATE INDEX idx_doc_importance_metadata "
+            "ON documents(json_extract(metadata, '$.importance'))"
+        ),
+        "idx_doc_last_access_metadata": (
+            "CREATE INDEX idx_doc_last_access_metadata "
+            "ON documents(json_extract(metadata, '$.last_access_time'))"
+        ),
+        "idx_documents_doc_id": (
+            "CREATE INDEX idx_documents_doc_id ON documents(doc_id)"
+        ),
+    }
 
     # 版本历史记录
     VERSION_HISTORY = {
@@ -35,6 +58,65 @@ class DBMigration:
         self.db_path = db_path
         self.migration_lock = asyncio.Lock()
 
+    async def validate_and_repair_known_indexes(self) -> list[str]:
+        """Rebuild plugin-owned document indexes reported by integrity_check."""
+        db_path = Path(self.db_path)
+        if not db_path.exists() or db_path.stat().st_size == 0:
+            return []
+
+        async with sqlite_connection(self.db_path) as db:
+            cursor = await db.execute("PRAGMA integrity_check")
+            results = [str(row[0]) for row in await cursor.fetchall()]
+            if results == ["ok"]:
+                return []
+
+            repairable = [
+                index_name
+                for index_name in self.REBUILDABLE_DOCUMENT_INDEXES
+                if any(index_name in result for result in results)
+            ]
+            unresolved = [
+                result
+                for result in results
+                if not any(index_name in result for index_name in repairable)
+            ]
+            if unresolved:
+                raise RuntimeError(
+                    "SQLite 完整性检查发现不可自动修复的问题: "
+                    + "; ".join(unresolved[:5])
+                )
+
+            if not repairable:
+                raise RuntimeError(
+                    "SQLite 完整性检查失败，但未识别到可安全重建的索引: "
+                    + "; ".join(results[:5])
+                )
+
+            logger.warning(
+                "检测到可重建的 SQLite 索引损坏: %s",
+                ", ".join(repairable),
+            )
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                for index_name in repairable:
+                    await db.execute(f'DROP INDEX IF EXISTS "{index_name}"')
+                    await db.execute(self.REBUILDABLE_DOCUMENT_INDEXES[index_name])
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+
+            cursor = await db.execute("PRAGMA integrity_check")
+            recheck = [str(row[0]) for row in await cursor.fetchall()]
+            if recheck != ["ok"]:
+                raise RuntimeError(
+                    "SQLite 索引重建后完整性检查仍失败: "
+                    + "; ".join(recheck[:5])
+                )
+
+            logger.info("SQLite 派生索引已重建并通过完整性检查")
+            return repairable
+
     async def get_db_version(self) -> int:
         """
         获取当前数据库版本
@@ -43,7 +125,7 @@ class DBMigration:
             int: 数据库版本号，如果不存在版本表则返回1（旧版本）
         """
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with sqlite_connection(self.db_path) as db:
                 # 检查版本表是否存在
                 cursor = await db.execute("""
                     SELECT name FROM sqlite_master
@@ -103,7 +185,7 @@ class DBMigration:
     async def initialize_version_table(self):
         """初始化版本管理表"""
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with sqlite_connection(self.db_path) as db:
                 await db.execute("""
                     CREATE TABLE IF NOT EXISTS db_version (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -131,7 +213,7 @@ class DBMigration:
             duration: 迁移耗时（秒）
         """
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with sqlite_connection(self.db_path) as db:
                 await db.execute(
                     """
                     INSERT INTO db_version (version, description, migrated_at, migration_duration_seconds)
@@ -290,7 +372,7 @@ class DBMigration:
 
         try:
             # 检查是否有documents表
-            async with aiosqlite.connect(self.db_path) as db:
+            async with sqlite_connection(self.db_path) as db:
                 cursor = await db.execute("""
                     SELECT COUNT(*) FROM sqlite_master
                     WHERE type='table' AND name='documents'
@@ -327,7 +409,7 @@ class DBMigration:
             logger.info(f"数据库迁移完成（{total_docs} 条文档已保留在 documents 表）")
 
             # 创建迁移状态标记
-            async with aiosqlite.connect(self.db_path) as db:
+            async with sqlite_connection(self.db_path) as db:
                 await db.execute("""
                     CREATE TABLE IF NOT EXISTS migration_status (
                         key TEXT PRIMARY KEY,
@@ -410,7 +492,7 @@ class DBMigration:
         logger.info("执行迁移步骤: v3 -> v4 (Schema v2 双通道总结字段)")
 
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with sqlite_connection(self.db_path) as db:
                 # 检查 documents 表是否存在
                 cursor = await db.execute("""
                     SELECT COUNT(*) FROM sqlite_master
@@ -470,7 +552,7 @@ class DBMigration:
         logger.info("执行迁移步骤: v4 -> v5 (Graph memory tables)")
 
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with sqlite_connection(self.db_path) as db:
                 await db.execute("PRAGMA foreign_keys = ON")
                 await db.execute(
                     """
@@ -571,7 +653,7 @@ class DBMigration:
         logger.info("执行迁移步骤: v5 -> v6 (FTS 表前缀化与旧表备份)")
 
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with sqlite_connection(self.db_path) as db:
                 await db.execute("""
                     CREATE VIRTUAL TABLE IF NOT EXISTS livingmemory_memories_fts
                     USING fts5(content, doc_id UNINDEXED, tokenize='unicode61')
@@ -611,7 +693,7 @@ class DBMigration:
         logger.info("执行迁移步骤: v6 -> v7 (storage indexes and FTS maintenance)")
 
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with sqlite_connection(self.db_path) as db:
                 await db.execute("PRAGMA busy_timeout = 10000")
                 await db.execute("PRAGMA foreign_keys = ON")
 
@@ -682,7 +764,7 @@ class DBMigration:
         logger.info("执行迁移步骤: v7 -> v8 (write ops and hot metadata indexes)")
 
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with sqlite_connection(self.db_path) as db:
                 await db.execute("PRAGMA busy_timeout = 10000")
                 await db.execute(
                     """
@@ -848,7 +930,7 @@ class DBMigration:
             # 获取迁移历史
             migration_history = []
             try:
-                async with aiosqlite.connect(self.db_path) as db:
+                async with sqlite_connection(self.db_path) as db:
                     cursor = await db.execute("""
                         SELECT version, description, migrated_at, migration_duration_seconds
                         FROM db_version
@@ -901,8 +983,8 @@ class DBMigration:
 
             logger.info(f"正在创建数据库备份: {backup_path}")
 
-            # 使用SQLite的备份API
-            async with aiosqlite.connect(self.db_path) as source:
+            # Use SQLite's online backup API while holding the source path lock.
+            async with sqlite_connection(self.db_path) as source:
                 async with aiosqlite.connect(str(backup_path)) as dest:
                     await source.backup(dest)
 

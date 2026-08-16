@@ -68,6 +68,20 @@ def test_register_llm_tools_defaults_only_recall():
     assert plugin._llm_tools_registered is True
 
 
+def test_recall_tool_exposes_chinese_description_without_changing_contract():
+    tool = MemorySearchTool()
+
+    assert tool.name == "recall_long_term_memory"
+    assert "长期记忆" in tool.description
+    assert "完整的用户消息" in tool.description
+    assert tool.parameters["required"] == ["query"]
+    assert set(tool.parameters["properties"]) == {"query", "k"}
+    assert tool.parameters["properties"]["query"]["type"] == "string"
+    assert tool.parameters["properties"]["k"]["type"] == "integer"
+    assert tool.parameters["properties"]["k"]["default"] == 5
+    assert "长期记忆" in tool.parameters["properties"]["query"]["description"]
+
+
 def test_register_llm_tools_no_memory_engine():
     plugin = LivingMemoryPlugin.__new__(LivingMemoryPlugin)
     plugin.context = Mock()

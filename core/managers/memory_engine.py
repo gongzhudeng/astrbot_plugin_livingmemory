@@ -17,6 +17,7 @@ from astrbot.api import logger
 
 from ...storage.atom_store import AtomStore
 from ...storage.graph_store import GraphStore
+from ...storage.sqlite_utils import open_sqlite_connection, with_sqlite_lock
 from ..managers.atom_lifecycle_manager import AtomLifecycleManager
 from ..managers.graph_memory_manager import GraphMemoryManager
 from ..models.memory_atom import AtomStatus, AtomType, DecayType, MemoryAtom
@@ -151,6 +152,7 @@ class MemoryEngine:
         )
         self._write_op_max_retries = int(self.config.get("write_op_max_retries", 3))
 
+    @with_sqlite_lock(lambda self, *args, **kwargs: self.db_path)
     async def initialize(self):
         """
         异步初始化引擎
@@ -158,10 +160,10 @@ class MemoryEngine:
         创建数据库表、初始化所有检索器组件
         """
         # 1. 连接数据库
-        self.db_connection = await aiosqlite.connect(self.db_path)
+        self.db_connection = await open_sqlite_connection(
+            self.db_path, journal_mode="WAL"
+        )
         self.db_connection.row_factory = aiosqlite.Row
-        await self.db_connection.execute("PRAGMA journal_mode = WAL")
-        await self.db_connection.execute("PRAGMA busy_timeout = 10000")
 
         # 2. 创建表结构
         await self._create_tables()
@@ -233,20 +235,34 @@ class MemoryEngine:
         if self._write_op_repair_enabled:
             await self._repair_incomplete_write_ops()
 
+    @with_sqlite_lock(lambda self: self.db_path)
     async def close(self):
-        """关闭数据库连接和清理资源"""
-        if self.atom_lifecycle_manager is not None:
-            await self.atom_lifecycle_manager.stop()
-        if self._pending_tasks:
-            for task in self._pending_tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*self._pending_tasks, return_exceptions=True)
-            self._pending_tasks.clear()
-        if self.db_connection:
-            await self.db_connection.close()
-        if self.graph_vector_db is not None:
-            await self.graph_vector_db.close()
+        """Idempotently stop tasks and close engine-owned resources."""
+        lifecycle_manager = self.atom_lifecycle_manager
+        self.atom_lifecycle_manager = None
+        if lifecycle_manager is not None:
+            try:
+                await lifecycle_manager.stop()
+            except Exception:
+                logger.warning("停止 AtomLifecycleManager 失败", exc_info=True)
+
+        pending_tasks = tuple(self._pending_tasks)
+        self._pending_tasks.clear()
+        for task in pending_tasks:
+            if not task.done():
+                task.cancel()
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+
+        db_connection = self.db_connection
+        self.db_connection = None
+        if db_connection is not None:
+            try:
+                await db_connection.close()
+            except Exception:
+                logger.warning("关闭 MemoryEngine SQLite 连接失败", exc_info=True)
+
+        self._search_cache.clear()
 
     def _create_tracked_task(self, coro) -> None:
         """Create and track a background task, auto-discarding on completion."""
@@ -965,6 +981,7 @@ class MemoryEngine:
 
     # ==================== 核心记忆操作 ====================
 
+    @with_sqlite_lock(lambda self, *args, **kwargs: self.db_path)
     async def add_memory(
         self,
         content: str,
@@ -1238,6 +1255,7 @@ class MemoryEngine:
             logger.warning("[MemoryEngine] 获取记忆详情失败", exc_info=True)
             return None
 
+    @with_sqlite_lock(lambda self, *args, **kwargs: self.db_path)
     async def update_memory(
         self,
         memory_id: int,
@@ -1393,6 +1411,7 @@ class MemoryEngine:
 
         return True
 
+    @with_sqlite_lock(lambda self, *args, **kwargs: self.db_path)
     async def delete_memory(self, memory_id: int) -> bool:
         """
         删除记忆
@@ -1483,6 +1502,7 @@ class MemoryEngine:
         self._invalidate_search_cache()
         return success
 
+    @with_sqlite_lock(lambda self, *args, **kwargs: self.db_path)
     async def rebuild_graph_index(self) -> dict[str, int]:
         """Rebuild graph-memory artifacts from stored documents."""
         if self.graph_memory_manager is None:
@@ -1543,6 +1563,7 @@ class MemoryEngine:
         """
         return await self.update_memory(memory_id, {"importance": new_importance})
 
+    @with_sqlite_lock(lambda self, *args, **kwargs: self.db_path)
     async def apply_daily_decay(self, decay_rate: float, days: int = 1) -> int:
         """
         批量应用重要性衰减
@@ -1639,6 +1660,7 @@ class MemoryEngine:
         """
         return await self._update_access_time_internal(memory_id)
 
+    @with_sqlite_lock(lambda self, *args, **kwargs: self.db_path)
     async def _update_access_time_internal(self, memory_id: int) -> bool:
         """内部方法:更新访问时间（直接更新documents表，不经过FAISS）"""
         import json
@@ -1793,6 +1815,7 @@ class MemoryEngine:
             )
             return []
 
+    @with_sqlite_lock(lambda self, *args, **kwargs: self.db_path)
     async def batch_delete_memories(self, memory_ids: list[int]) -> int:
         """Batch delete multiple memories using bulk SQL operations."""
         if not memory_ids:
@@ -1911,6 +1934,7 @@ class MemoryEngine:
             logger.info(f"[批量删除] 共删除 {total_deleted} 条记忆")
         return total_deleted
 
+    @with_sqlite_lock(lambda self, *args, **kwargs: self.db_path)
     async def cleanup_old_memories(
         self,
         days_threshold: int | None = None,
@@ -2010,6 +2034,7 @@ class MemoryEngine:
             logger.error("[清理] 清理旧记忆失败", exc_info=True)
             return 0
 
+    @with_sqlite_lock(lambda self, *args, **kwargs: self.db_path)
     async def _migrate_session_data_if_needed(self, unified_msg_origin: str) -> None:
         """
         运行时自动迁移：将旧格式的session_id更新为unified_msg_origin格式
@@ -2282,6 +2307,7 @@ class MemoryEngine:
                 "graph_memory_enabled": bool(self.graph_store is not None),
             }
 
+    @with_sqlite_lock(lambda self, *args, **kwargs: self.db_path)
     async def maintain_storage(self, *, vacuum: bool = False) -> dict[str, Any]:
         """Run SQLite storage maintenance and return size diagnostics."""
         try:

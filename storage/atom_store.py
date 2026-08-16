@@ -17,6 +17,7 @@ from ..core.models.memory_atom import (
     MemoryAtom,
     compute_ttl,
 )
+from .sqlite_utils import sqlite_connection
 
 
 class AtomStore:
@@ -29,13 +30,9 @@ class AtomStore:
 
     @asynccontextmanager
     async def _connect(self):
-        db = await aiosqlite.connect(self.db_path)
-        try:
-            await db.execute("PRAGMA journal_mode = WAL")
-            await db.execute("PRAGMA busy_timeout = 10000")
+        """Create a configured SQLite connection under the shared path lock."""
+        async with sqlite_connection(self.db_path) as db:
             yield db
-        finally:
-            await db.close()
 
     @staticmethod
     def _now_iso() -> str:

@@ -79,7 +79,7 @@ async def test_add_message_normalizes_multimodal_content(tmp_path: Path):
     await store.add_message(msg)
     messages = await store.get_messages("s1", limit=10)
 
-    assert messages[0].content == "图片里的日程是下午三点"
+    assert messages[0].content == "[图片消息] 图片里的日程是下午三点"
     assert "image_url" not in messages[0].content
 
     await store.close()

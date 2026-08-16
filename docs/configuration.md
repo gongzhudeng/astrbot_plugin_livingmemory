@@ -74,6 +74,8 @@ LivingMemory 的默认配置已经适合大多数场景。真正需要调整的�
 | `agent_tools.enable_recall_tool` | `true` | 注册 `recall_long_term_memory`，允许 Agent 主动检索长期记忆 |
 | `agent_tools.enable_memorize_tool` | `false` | 注册 `memorize_long_term_memory`，允许 Agent 主动写入长期记忆 |
 
+主动回忆工具 `recall_long_term_memory` 由 Agent 根据当前上下文按需调用，适合回忆过去事实、偏好、约定和较早的上下文，也适合核实模糊指代。调用时使用短而明确的 `query` 关键词，不要复制完整用户消息；`k` 控制本次最多返回的记忆条数，默认值为 5。如果第一次召回不足，可以优化关键词后再次调用。工具名和参数名属于运行时协议，请保持不变。
+
 主动写入工具更强，也更需要模型自律。建议先只开启主动回忆，确认效果稳定后再启用主动写入。
 
 ## 图记忆与原子化

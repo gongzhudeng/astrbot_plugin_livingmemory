@@ -2,6 +2,7 @@
 Tests for EventHandler core behaviors.
 """
 
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -16,6 +17,7 @@ def memory_engine():
     engine = Mock()
     engine.search_memories = AsyncMock(return_value=[])
     engine.add_memory = AsyncMock(return_value=1)
+    engine.get_session_memories = AsyncMock(return_value=[])
     return engine
 
 
@@ -92,6 +94,65 @@ def _make_resp(text: str = "assistant reply"):
     return resp
 
 
+@pytest.mark.asyncio
+async def test_attention_history_returns_only_private_messages_after_cutoff(handler):
+    from astrbot_plugin_livingmemory.core.models.conversation_models import Message
+
+    before = datetime(2026, 8, 15, 9, tzinfo=timezone.utc).timestamp()
+    after = datetime(2026, 8, 15, 11, tzinfo=timezone.utc).timestamp()
+    handler.conversation_manager.get_messages = AsyncMock(
+        return_value=[
+            Message(1, "s1", "user", "过早的消息", "u1", timestamp=before),
+            Message(
+                2,
+                "s1",
+                "user",
+                [{"type": "image", "url": "photo.jpg"}],
+                "u1",
+                timestamp=after,
+            ),
+            Message(
+                3,
+                "s1",
+                "assistant",
+                [{"type": "record", "file": "voice.amr"}],
+                "bot",
+                timestamp=after,
+                metadata={"is_bot_message": True},
+            ),
+            Message(
+                4,
+                "s1",
+                "user",
+                "群聊消息不应进入私聊对账",
+                "u2",
+                group_id="group-1",
+                timestamp=after,
+            ),
+        ]
+    )
+
+    history = await handler.get_attention_history(
+        "s1", since="2026-08-15T10:00:00+00:00", limit=1000
+    )
+
+    assert history == [
+        {
+            "speaker": "user",
+            "at": "2026-08-15T11:00:00+00:00",
+            "text": "[图片消息]",
+        },
+        {
+            "speaker": "assistant",
+            "at": "2026-08-15T11:00:00+00:00",
+            "text": "[语音消息]",
+        },
+    ]
+    handler.conversation_manager.get_messages.assert_awaited_once_with(
+        "s1", limit=600, use_cache=False
+    )
+
+
 def _make_event(group: bool = False):
     event = Mock()
     event.unified_msg_origin = "test:private:sid-1"
@@ -107,6 +168,87 @@ def _make_event(group: bool = False):
     event.set_extra = Mock()
     event.get_platform_name = Mock(return_value="test")
     return event
+
+
+@pytest.mark.asyncio
+async def test_daily_context_combines_bounded_summaries_and_tail(
+    handler, memory_engine, conversation_manager
+):
+    memory_engine.get_session_memories.return_value = [
+        {
+            "text": "fallback",
+            "metadata": {
+                "persona_summary": "较早的一段总结",
+                "source_window": {"start_index": 0, "end_index": 6},
+            },
+        },
+        {
+            "text": "manual memory without a source window",
+            "metadata": {},
+        },
+        {
+            "text": "fallback",
+            "metadata": {
+                "canonical_summary": "最近的一段总结",
+                "source_window": {"start_index": 6, "end_index": 10},
+            },
+        },
+    ]
+    conversation_manager.get_session_metadata = AsyncMock(return_value=10)
+    conversation_manager.store.get_message_count = AsyncMock(return_value=12)
+    conversation_manager.get_messages_range = AsyncMock(
+        return_value=[
+            Mock(role="user", content="尾部消息一", timestamp=1.0),
+            Mock(role="assistant", content="尾部消息二", timestamp=2.0),
+        ]
+    )
+
+    result = await handler.get_daily_context(
+        "test:private:sid-1", max_messages=2, max_chars=200
+    )
+
+    memory_engine.get_session_memories.assert_awaited_once_with(
+        "test:private:sid-1", limit=8
+    )
+    assert [item["summary"] for item in result["memory_summaries"]] == [
+        "最近的一段总结",
+        "较早的一段总结",
+    ]
+    assert [item["content"] for item in result["tail_messages"]] == [
+        "尾部消息一",
+        "尾部消息二",
+    ]
+    assert result["last_summarized_index"] == 10
+    conversation_manager.get_messages_range.assert_awaited_once_with(
+        "test:private:sid-1", 10, 12
+    )
+
+
+@pytest.mark.asyncio
+async def test_daily_context_uses_one_shared_character_budget(
+    handler, memory_engine, conversation_manager
+):
+    memory_engine.get_session_memories.return_value = [
+        {
+            "text": "fallback",
+            "metadata": {
+                "persona_summary": "1234567890",
+                "source_window": {"start_index": 0, "end_index": 2},
+            },
+        }
+    ]
+    conversation_manager.get_session_metadata = AsyncMock(return_value=2)
+    conversation_manager.store.get_message_count = AsyncMock(return_value=3)
+    conversation_manager.get_messages_range = AsyncMock(
+        return_value=[Mock(role="user", content="should not fit", timestamp=1.0)]
+    )
+
+    result = await handler.get_daily_context(
+        "test:private:sid-1", max_messages=1, max_chars=10
+    )
+
+    assert result["memory_summaries"][0]["summary"] == "1234567890"
+    assert result["tail_messages"] == []
 
 
 @pytest.mark.asyncio
@@ -556,6 +698,178 @@ async def test_storage_task_writes_source_window(
 
 
 @pytest.mark.asyncio
+async def test_successful_private_storage_notifies_emotion_observer(
+    handler, memory_processor
+):
+    from astrbot_plugin_livingmemory.core.models.conversation_models import Message
+
+    callback = AsyncMock()
+    handler.context._emotion_state_memory_summary = callback
+    memory_processor.process_conversation = AsyncMock(
+        return_value=(
+            "summary",
+            {
+                "persona_summary": "private summary",
+                "emotional_observations": [
+                    {
+                        "action": "merge",
+                        "event_id": "event-1",
+                        "event_version": 3,
+                        "fact": "updated fact",
+                    }
+                ],
+                "attention_observations": [
+                    {
+                        "action": "confirm",
+                        "item_id": "attention-1",
+                        "item_version": 2,
+                        "kind": "commitment",
+                    }
+                ],
+                "mood_adjustment": {
+                    "valence": 0.4,
+                    "energy": 0.55,
+                    "tension": 0.1,
+                    "confidence": 0.8,
+                },
+                "emotion_source_has_text": True,
+            },
+            0.6,
+        )
+    )
+    messages = [
+        Message(
+            id=1,
+            session_id="s1",
+            role="user",
+            content="hello",
+            sender_id="u1",
+            sender_name="User",
+            group_id=None,
+            platform="test",
+            metadata={},
+        )
+    ]
+
+    await handler._memory_reflection._storage_task(
+        session_id="s1",
+        history_messages=messages,
+        persona_id="p1",
+        start_index=2,
+        end_index=3,
+        retry_count=0,
+    )
+
+    callback.assert_awaited_once()
+    payload = callback.await_args.args[0]
+    assert payload["session_id"] == "s1"
+    assert payload["summary_id"] == "s1:1"
+    assert payload["memory_id"] == 1
+    assert payload["start_index"] == 2
+    assert payload["end_index"] == 3
+    assert payload["summary"] == "private summary"
+    assert payload["emotional_observations"] == [
+        {
+            "action": "merge",
+            "event_id": "event-1",
+            "event_version": 3,
+            "fact": "updated fact",
+        }
+    ]
+    assert payload["attention_observations"] == [
+        {
+            "action": "confirm",
+            "item_id": "attention-1",
+            "item_version": 2,
+            "kind": "commitment",
+        }
+    ]
+    assert payload["emotion_source_has_text"] is True
+    assert payload["mood_adjustment"] == {
+        "valence": 0.4,
+        "energy": 0.55,
+        "tension": 0.1,
+        "confidence": 0.8,
+    }
+
+
+@pytest.mark.asyncio
+async def test_group_storage_does_not_notify_emotion_observer(handler):
+    from astrbot_plugin_livingmemory.core.models.conversation_models import Message
+
+    callback = AsyncMock()
+    handler.context._emotion_state_memory_summary = callback
+    messages = [
+        Message(
+            id=1,
+            session_id="group:s1",
+            role="user",
+            content="hello group",
+            sender_id="u1",
+            sender_name="User",
+            group_id="g1",
+            platform="test",
+            metadata={},
+        )
+    ]
+
+    await handler._memory_reflection._storage_task(
+        session_id="group:s1",
+        history_messages=messages,
+        persona_id="p1",
+        start_index=0,
+        end_index=1,
+        retry_count=0,
+    )
+
+    callback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_storage_failure_does_not_notify_emotion_observer(handler, memory_engine):
+    from astrbot_plugin_livingmemory.core.models.conversation_models import Message
+
+    callback = AsyncMock()
+    handler.context._emotion_state_memory_summary = callback
+    memory_engine.add_memory = AsyncMock(side_effect=RuntimeError("write failed"))
+    messages = [
+        Message(
+            id=1,
+            session_id="s1",
+            role="user",
+            content="hello",
+            sender_id="u1",
+            sender_name="User",
+            group_id=None,
+            platform="test",
+            metadata={},
+        ),
+        Message(
+            id=2,
+            session_id="s1",
+            role="assistant",
+            content="hi",
+            sender_id="bot",
+            sender_name="Bot",
+            group_id=None,
+            platform="test",
+            metadata={"is_bot_message": True},
+        ),
+    ]
+
+    await handler._memory_reflection._storage_task(
+        session_id="s1",
+        history_messages=messages,
+        persona_id="p1",
+        start_index=0,
+        end_index=2,
+        retry_count=0,
+    )
+
+    callback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_storage_task_skips_when_already_summarized(
     handler, conversation_manager, memory_engine
 ):
@@ -894,7 +1208,9 @@ async def test_remove_fake_tool_call_from_context(handler):
         {"role": "user", "content": "最近怎么样"},
     ]
 
-    removed = handler._memory_recall._remove_fake_tool_call_from_context(req, "test-session")
+    removed = handler._memory_recall._remove_fake_tool_call_from_context(
+        req, "test-session"
+    )
 
     # 应删除 2 条伪造消息
     assert removed == 2
@@ -933,7 +1249,9 @@ async def test_remove_fake_tool_call_preserves_real_tool_calls(handler):
         },
     ]
 
-    removed = handler._memory_recall._remove_fake_tool_call_from_context(req, "test-session")
+    removed = handler._memory_recall._remove_fake_tool_call_from_context(
+        req, "test-session"
+    )
 
     # 不应删除任何消息
     assert removed == 0
@@ -1467,11 +1785,12 @@ async def test_top_k_0_cleans_livingmemory_temp_extra_parts(
     memory_engine, memory_processor, conversation_manager
 ):
     """top_k=0 时应按 _no_save 清理 LivingMemory 上轮临时 extra_user_content。"""
-    from astrbot.core.agent.message import TextPart
     from astrbot_plugin_livingmemory.core.base.constants import (
         MEMORY_INJECTION_FOOTER,
         MEMORY_INJECTION_HEADER,
     )
+
+    from astrbot.core.agent.message import TextPart
 
     handler = _make_handler_with_top_k_0(
         memory_engine, memory_processor, conversation_manager

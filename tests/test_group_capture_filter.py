@@ -1,16 +1,15 @@
 """Regression checks for full group capture not waking ordinary messages."""
 
-from unittest.mock import Mock
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-from astrbot.api.platform import MessageType
-
 from astrbot_plugin_livingmemory.core.passive_group_capture import (
     PassiveGroupCaptureFilter,
     is_plugin_enabled_for_session,
     is_session_enabled,
 )
+
+from astrbot.api.platform import MessageType
 
 
 class AlwaysPassFilter:
@@ -182,9 +181,7 @@ async def test_passive_group_capture_skips_session_disabled_plugin():
         "astrbot_plugin_livingmemory.core.passive_group_capture.sp.get_async",
         new=AsyncMock(
             return_value={
-                "aiocqhttp:GroupMessage:group-1": {
-                    "disabled_plugins": ["LivingMemory"]
-                }
+                "aiocqhttp:GroupMessage:group-1": {"disabled_plugins": ["LivingMemory"]}
             }
         ),
     ):
@@ -200,9 +197,7 @@ async def test_passive_group_capture_skips_disabled_session():
         "astrbot_plugin_livingmemory.core.passive_group_capture.sp.get_async",
         new=AsyncMock(return_value={"session_enabled": False}),
     ):
-        assert (
-            await is_session_enabled("aiocqhttp:GroupMessage:group-1") is False
-        )
+        assert await is_session_enabled("aiocqhttp:GroupMessage:group-1") is False
 
 
 @pytest.mark.asyncio

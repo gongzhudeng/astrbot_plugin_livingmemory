@@ -33,12 +33,12 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
 
     name: str = "recall_long_term_memory"
     description: str = (
-        "Recall long-term memory when the current context is insufficient. "
-        "Use concise, focused recall keywords instead of copying the full user message. "
-        "Call this when the user asks you to recall prior facts, preferences, agreements, or older context, "
-        "or when resolving ambiguous references requires checking memory. "
-        "Prefer short topic phrases, named entities, preferences, commitments, or past events as recall keywords. "
-        "If the first recall is not enough, refine the keywords and recall again."
+        "当当前上下文不足时，回忆相关的长期记忆。"
+        "请使用简洁、聚焦的回忆关键词，不要复制完整的用户消息。"
+        "当用户询问过去的事实、偏好、约定或较早的上下文，"
+        "或者需要核实模糊指代时，调用此工具。"
+        "关键词优先使用简短主题、人物或事物名称、偏好、承诺或过去发生的事件。"
+        "如果第一次召回的信息不足，请优化关键词后再次召回。"
     )
     parameters: dict[str, Any] = field(
         default_factory=lambda: {
@@ -46,11 +46,11 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Concise recall keywords for long-term memory. Prefer key entities, topics, preferences, commitments, or past events instead of copying the full user message.",
+                    "description": "用于检索长期记忆的简洁关键词。优先填写关键实体、主题、偏好、约定或过去发生的事件，不要复制完整的用户消息。",
                 },
                 "k": {
                     "type": "integer",
-                    "description": "Maximum number of memory items to return for one recall. Keep this small unless more evidence is needed.",
+                    "description": "本次召回最多返回的记忆条数。除非需要更多证据，否则请保持较小的数量。",
                     "default": 5,
                 },
             },

@@ -7,9 +7,9 @@ import os
 from dataclasses import dataclass
 from typing import Any, cast
 
-import aiosqlite
-
 from astrbot.api import logger
+
+from ...storage.sqlite_utils import sqlite_connection, with_sqlite_lock
 
 
 @dataclass
@@ -60,7 +60,7 @@ class IndexValidator:
         """清空 BM25 索引表，不触碰 documents 原始数据。"""
         for attempt in range(max_attempts):
             try:
-                async with aiosqlite.connect(self.db_path) as db:
+                async with sqlite_connection(self.db_path) as db:
                     await db.execute("PRAGMA busy_timeout = 10000")
                     try:
                         await db.execute(f"DELETE FROM {table_name}")
@@ -90,7 +90,7 @@ class IndexValidator:
             IndexStatus: 索引状态信息
         """
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with sqlite_connection(self.db_path) as db:
                 # 1. 获取documents表中的文档数和ID集合
                 cursor = await db.execute("SELECT COUNT(*) FROM documents")
                 count_result = await cursor.fetchone()
@@ -216,7 +216,7 @@ class IndexValidator:
             Tuple[bool, int]: (是否需要重建, 待处理文档数)
         """
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with sqlite_connection(self.db_path) as db:
                 # 检查migration_status表
                 cursor = await db.execute("""
                     SELECT name FROM sqlite_master
@@ -327,13 +327,13 @@ class IndexValidator:
         )
 
     async def _get_document_count(self) -> int:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with sqlite_connection(self.db_path) as db:
             cursor = await db.execute("SELECT COUNT(*) FROM documents")
             row = await cursor.fetchone()
             return int(row[0]) if row else 0
 
     async def _get_document_ids(self) -> set[int]:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with sqlite_connection(self.db_path) as db:
             cursor = await db.execute("SELECT id FROM documents")
             return {int(row[0]) for row in await cursor.fetchall()}
 
@@ -347,7 +347,7 @@ class IndexValidator:
             for start in range(0, len(sorted_ids), batch_size):
                 chunk = sorted_ids[start : start + batch_size]
                 placeholders = ",".join("?" for _ in chunk)
-                async with aiosqlite.connect(self.db_path) as db:
+                async with sqlite_connection(self.db_path) as db:
                     await db.execute("PRAGMA busy_timeout = 10000")
                     cursor = await db.execute(
                         f"""
@@ -363,7 +363,7 @@ class IndexValidator:
 
         last_id = 0
         while True:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with sqlite_connection(self.db_path) as db:
                 await db.execute("PRAGMA busy_timeout = 10000")
                 cursor = await db.execute(
                     """
@@ -446,7 +446,7 @@ class IndexValidator:
 
             if rows_to_insert:
                 try:
-                    async with aiosqlite.connect(self.db_path) as db:
+                    async with sqlite_connection(self.db_path) as db:
                         await db.execute("PRAGMA busy_timeout = 10000")
                         await db.executemany(
                             f"INSERT INTO {table_name}(doc_id, content) VALUES (?, ?)",
@@ -458,7 +458,7 @@ class IndexValidator:
                     logger.warning(f"BM25 批量写入失败，将逐条重试: {batch_error}")
                     for row_doc_id, processed_content in rows_to_insert:
                         try:
-                            async with aiosqlite.connect(self.db_path) as db:
+                            async with sqlite_connection(self.db_path) as db:
                                 await db.execute("PRAGMA busy_timeout = 10000")
                                 await db.execute(
                                     f"INSERT INTO {table_name}(doc_id, content) VALUES (?, ?)",
@@ -822,7 +822,7 @@ class IndexValidator:
         from datetime import datetime, timezone
 
         try:
-            async with aiosqlite.connect(self.db_path) as status_db:
+            async with sqlite_connection(self.db_path) as status_db:
                 await status_db.execute("""
                     CREATE TABLE IF NOT EXISTS migration_status (
                         key TEXT PRIMARY KEY,
@@ -856,6 +856,7 @@ class IndexValidator:
         except Exception as e:
             logger.warning(f"更新迁移状态失败: {e}")
 
+    @with_sqlite_lock(lambda self, *args, **kwargs: self.db_path)
     async def rebuild_indexes(
         self, memory_engine: Any, progress_callback=None
     ) -> dict[str, Any]:
@@ -996,7 +997,7 @@ class IndexValidator:
         仅在备份表存在且 documents 表为空时执行恢复。
         """
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with sqlite_connection(self.db_path) as db:
                 await db.execute("PRAGMA busy_timeout = 10000")
 
                 # 检查备份表是否存在

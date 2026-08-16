@@ -52,9 +52,7 @@ class TestDecaySchedulerStateManagement:
         assert state == {}
 
     @pytest.mark.asyncio
-    async def test_load_state_with_corrupted_json(
-        self, tmp_path, mock_memory_engine
-    ):
+    async def test_load_state_with_corrupted_json(self, tmp_path, mock_memory_engine):
         """测试损坏的JSON文件返回空字典"""
         scheduler = DecayScheduler(
             memory_engine=mock_memory_engine,
@@ -327,7 +325,9 @@ class TestDecaySchedulerBackup:
     """测试备份功能"""
 
     @pytest.mark.asyncio
-    async def test_run_backup_success(self, tmp_path, mock_memory_engine, mock_db_migration):
+    async def test_run_backup_success(
+        self, tmp_path, mock_memory_engine, mock_db_migration
+    ):
         """测试成功备份"""
         backup_dir = tmp_path / "backups"
         backup_dir.mkdir()
@@ -357,7 +357,9 @@ class TestDecaySchedulerBackup:
         await scheduler._run_backup()
 
     @pytest.mark.asyncio
-    async def test_cleanup_old_backups(self, tmp_path, mock_memory_engine, mock_db_migration):
+    async def test_cleanup_old_backups(
+        self, tmp_path, mock_memory_engine, mock_db_migration
+    ):
         """测试清理过期备份"""
         # 创建backup目录和测试文件
         backup_dir = tmp_path / "backups"
@@ -368,6 +370,7 @@ class TestDecaySchedulerBackup:
         old_backup.touch()
         old_time = datetime.now().timestamp() - 10 * 86400
         import os
+
         os.utime(old_backup, (old_time, old_time))
 
         # 创建一个新备份文件（1天前）

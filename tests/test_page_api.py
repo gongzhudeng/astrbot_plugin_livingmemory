@@ -5,7 +5,7 @@ Tests for PluginPageApi — WebUI REST API endpoints and helpers.
 from __future__ import annotations
 
 import json
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
@@ -503,17 +503,22 @@ class TestListMemories:
                 "status": "all",
             }
         )
+        @asynccontextmanager
+        async def fake_connection(db_path):
+            assert db_path == ":memory:"
+            mock_conn = AsyncMock()
+            count_cursor = AsyncMock()
+            count_cursor.fetchone.return_value = {"total": 0}
+            rows_cursor = AsyncMock()
+            rows_cursor.fetchall.return_value = []
+            mock_conn.execute.side_effect = [count_cursor, rows_cursor]
+            yield mock_conn
+
         with _patch_page_request(req):
             with patch(
-                "astrbot_plugin_livingmemory.core.page_api_modules.memory_handler.aiosqlite"
-            ) as mock_sqlite:
-                mock_conn = AsyncMock()
-                mock_conn.execute.return_value = mock_conn
-                mock_conn.fetchone.return_value = {"total": 0}
-                mock_conn.fetchall.return_value = []
-                mock_sqlite.connect.return_value.__aenter__.return_value = mock_conn
-                mock_sqlite.Row = dict
-
+                "astrbot_plugin_livingmemory.core.page_api_modules.memory_handler.sqlite_connection",
+                fake_connection,
+            ):
                 result = await api.list_memories()
         assert result["status"] == "ok"
         assert result["data"]["total"] == 0
@@ -667,7 +672,9 @@ class TestUpdateMemory:
 
     @pytest.mark.asyncio
     async def test_importance_valid_range(self, api):
-        api.plugin.initializer.memory_engine.update_memory = AsyncMock(return_value=True)
+        api.plugin.initializer.memory_engine.update_memory = AsyncMock(
+            return_value=True
+        )
         req = _mock_page_request(
             get_json={
                 "memory_id": 1,
@@ -693,7 +700,9 @@ class TestUpdateMemory:
 
     @pytest.mark.asyncio
     async def test_importance_display_scale_preserves_one_point_zero(self, api):
-        api.plugin.initializer.memory_engine.update_memory = AsyncMock(return_value=True)
+        api.plugin.initializer.memory_engine.update_memory = AsyncMock(
+            return_value=True
+        )
         req = _mock_page_request(
             get_json={
                 "memory_id": 1,
@@ -715,7 +724,9 @@ class TestUpdateMemory:
 
     @pytest.mark.asyncio
     async def test_importance_auto_scale_keeps_legacy_normalized_value(self, api):
-        api.plugin.initializer.memory_engine.update_memory = AsyncMock(return_value=True)
+        api.plugin.initializer.memory_engine.update_memory = AsyncMock(
+            return_value=True
+        )
         req = _mock_page_request(
             get_json={
                 "memory_id": 1,

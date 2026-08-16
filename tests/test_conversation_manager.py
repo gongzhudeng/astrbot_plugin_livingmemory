@@ -163,3 +163,31 @@ async def test_conversation_manager_falls_back_to_sender_id_for_unknown_name(
     assert message.sender_name == "24680"
 
     await store.close()
+
+
+@pytest.mark.asyncio
+async def test_conversation_manager_preserves_reply_evidence_metadata(tmp_path: Path):
+    from astrbot.core.message.components import Plain, Reply
+
+    class _ReplyEvent(_DummyEvent):
+        def get_messages(self):
+            return [
+                Reply(id="quoted-1", message_str="你真恶心，滚开"),
+                Plain("这句话不是我说的"),
+            ]
+
+    db_path = tmp_path / "reply.db"
+    store = ConversationStore(str(db_path))
+    await store.initialize()
+    manager = ConversationManager(store=store, max_cache_size=2, context_window_size=10)
+
+    message = await manager.add_message_from_event(
+        _ReplyEvent("test:private:reply"),
+        role="user",
+        content="这句话不是我说的",
+    )
+
+    assert message.metadata["has_reply"] is True
+    assert message.metadata["quoted_texts"] == ["你真恶心，滚开"]
+
+    await store.close()

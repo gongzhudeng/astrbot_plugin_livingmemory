@@ -91,9 +91,21 @@ class Message:
         if "message" in part:
             return Message._content_part_to_text(part.get("message"))
 
-        media_keys = {"image_url", "image", "file", "audio", "video", "media"}
-        if part_type in media_keys or any(key in part for key in media_keys):
-            return "", True
+        media_markers = {
+            "audio": "[语音消息]",
+            "record": "[语音消息]",
+            "video": "[视频消息]",
+            "file": "[文件消息]",
+            "image": "[图片消息]",
+            "image_url": "[图片消息]",
+            "media": "[媒体消息]",
+        }
+        media_keys = set(media_markers)
+        if part_type in media_markers:
+            return media_markers[part_type], True
+        for key, marker in media_markers.items():
+            if key in part:
+                return marker, True
         return "", False
 
     def to_dict(self) -> dict[str, Any]:

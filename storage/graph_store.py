@@ -10,6 +10,7 @@ from typing import Any
 import aiosqlite
 
 from ..core.models.graph_models import GraphEdge, GraphEntry, GraphNode
+from .sqlite_utils import sqlite_connection
 from ..core.utils.number_utils import safe_float
 
 
@@ -24,14 +25,10 @@ class GraphStore:
 
     @asynccontextmanager
     async def _connect(self):
-        """创建新的SQLite连接并启用WAL模式和busy_timeout。"""
-        db = await aiosqlite.connect(self.db_path)
-        try:
-            await db.execute("PRAGMA journal_mode = WAL")
-            await db.execute("PRAGMA busy_timeout = 10000")
+        """Create a configured SQLite connection under the shared path lock."""
+        async with sqlite_connection(self.db_path) as db:
+            await db.execute("PRAGMA foreign_keys = ON")
             yield db
-        finally:
-            await db.close()
 
     @staticmethod
     def _now_iso() -> str:

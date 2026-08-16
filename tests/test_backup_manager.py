@@ -7,10 +7,9 @@ import os
 from pathlib import Path
 
 from astrbot_plugin_livingmemory.core.managers.backup_manager import (
+    _BACKUP_INFO_FILE,
     PLUGIN_VERSION,
     BackupManager,
-    _BACKUP_INFO_FILE,
-    _VERSION_FILE,
 )
 
 
@@ -136,9 +135,7 @@ def test_list_backups_with_data(tmp_path: Path) -> None:
         "backup_timestamp": "2025-01-01T00:00:00+00:00",
         "files_copied": 1,
     }
-    (backup_root / _BACKUP_INFO_FILE).write_text(
-        json.dumps(info, ensure_ascii=False)
-    )
+    (backup_root / _BACKUP_INFO_FILE).write_text(json.dumps(info, ensure_ascii=False))
 
     result = BackupManager.list_backups(str(tmp_path))
     assert len(result) == 1
@@ -263,20 +260,26 @@ def test_backup_info_json_contains_all_fields(tmp_path: Path) -> None:
     """验证 backup_info.json 包含所有必要字段。"""
     (tmp_path / "livingmemory.db").write_text("test")
 
+    previous_version = "2.4.0"
     mgr = BackupManager(str(tmp_path))
-    mgr.version_file.write_text("2.5.0", encoding="utf-8")
+    mgr.version_file.write_text(previous_version, encoding="utf-8")
     backup_dir = mgr.backup_if_needed()
+    assert backup_dir is not None
 
     info = json.loads(
         (Path(backup_dir) / _BACKUP_INFO_FILE).read_text(encoding="utf-8")
     )
     required_fields = [
-        "plugin_version", "previous_version", "backup_timestamp",
-        "backup_unix_time", "files_copied", "data_dir",
+        "plugin_version",
+        "previous_version",
+        "backup_timestamp",
+        "backup_unix_time",
+        "files_copied",
+        "data_dir",
     ]
     for field in required_fields:
         assert field in info, f"Missing field: {field}"
-    assert info["previous_version"] == "2.5.0"
+    assert info["previous_version"] == previous_version
     assert info["plugin_version"] == PLUGIN_VERSION
     assert isinstance(info["backup_unix_time"], float)
 

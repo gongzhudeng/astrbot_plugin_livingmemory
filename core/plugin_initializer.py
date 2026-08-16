@@ -19,6 +19,7 @@ from astrbot.core.provider.provider import EmbeddingProvider, Provider
 
 from ..storage.conversation_store import ConversationStore
 from ..storage.db_migration import DBMigration
+from ..storage.sqlite_utils import with_sqlite_lock
 from .base.config_manager import ConfigManager
 from .base.exceptions import InitializationError, ProviderNotReadyError
 from .managers.conversation_manager import ConversationManager
@@ -118,57 +119,136 @@ class PluginInitializer:
         self._providers_ready = False
         self._provider_check_attempts = 0
         self._max_provider_attempts = 60
+        self._initialization_attempts = 0
+        self._max_initialization_attempts = 60
         self._retry_task: asyncio.Task | None = None
+        self._shutdown_requested = False
+        self._on_initialized: Any | None = None
+
+    def set_initialized_callback(self, callback: Any | None) -> None:
+        """Set the callback invoked after a successful initialization attempt."""
+        self._on_initialized = callback
+
+    async def _notify_initialized(self) -> None:
+        if self._on_initialized is None:
+            return
+        try:
+            result = self._on_initialized()
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            logger.error("初始化成功后的运行期组件装配失败", exc_info=True)
 
     async def initialize(self) -> bool:
-        """
-        执行初始化
-
-        Returns:
-            bool: 是否初始化成功
-        """
+        """Run one serialized initialization attempt."""
         async with self._initialization_lock:
-            if self._initialization_complete or self._initialization_failed:
-                return self._initialization_complete
+            if self._initialization_complete:
+                return True
+            if self._initialization_failed:
+                return False
 
-        logger.info("LivingMemory 插件开始后台初始化...")
-
-        try:
-            # 1. 等待 Provider 就绪
-            if not await self._wait_for_providers_non_blocking():
-                missing = []
-                if not self.embedding_provider:
-                    missing.append(
-                        "Embedding Provider（请在 AstrBot 中配置向量嵌入模型）"
-                    )
-                if not self.llm_provider:
-                    missing.append("LLM Provider（请在 AstrBot 中配置语言模型）")
-                logger.warning(
-                    f"以下 Provider 暂时不可用，将在后台继续尝试: {', '.join(missing)}"
-                )
+            logger.info("LivingMemory 插件开始后台初始化...")
+            self._initialization_attempts += 1
+            try:
+                return await self._initialize_once(schedule_retry=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(f"LivingMemory 插件初始化失败: {exc}", exc_info=True)
+                self._initialization_error = str(exc)
                 self._start_retry_task_if_needed()
                 return False
 
-            # 2. Provider 就绪，继续完整初始化
-            await self._complete_initialization()
-            return True
-
-        except Exception as e:
-            logger.error(f"LivingMemory 插件初始化失败: {e}", exc_info=True)
-            self._initialization_failed = True
-            self._initialization_error = str(e)
+    async def _initialize_once(self, schedule_retry: bool) -> bool:
+        """Wait for providers and execute one complete initialization attempt."""
+        if not await self._wait_for_providers_non_blocking():
+            missing = []
+            if not self.embedding_provider:
+                missing.append("Embedding Provider（请在 AstrBot 中配置向量嵌入模型）")
+            if not self.llm_provider:
+                missing.append("LLM Provider（请在 AstrBot 中配置语言模型）")
+            logger.warning(
+                f"以下 Provider 暂时不可用，将在后台继续尝试: {', '.join(missing)}"
+            )
+            if schedule_retry:
+                self._start_retry_task_if_needed()
             return False
 
+        try:
+            await self._complete_initialization()
+            await self._notify_initialized()
+            return True
+        except asyncio.CancelledError:
+            await self._teardown_partial_initialization()
+            raise
+        except Exception as exc:
+            self._initialization_error = str(exc)
+            await self._teardown_partial_initialization()
+            logger.error(
+                f"本次初始化尝试失败，将保留组件重试机会: {exc}", exc_info=True
+            )
+            if schedule_retry:
+                self._start_retry_task_if_needed()
+            return False
+
+    async def _retry_initialization(self) -> None:
+        """Retry provider discovery and full initialization with backoff."""
+        current_interval = 2.0
+        while (
+            not self._shutdown_requested
+            and not self._initialization_complete
+            and self._initialization_attempts < self._max_initialization_attempts
+            and (
+                bool(self.embedding_provider and self.llm_provider)
+                or self._provider_check_attempts < self._max_provider_attempts
+            )
+        ):
+            await asyncio.sleep(current_interval)
+            async with self._initialization_lock:
+                if self._shutdown_requested or self._initialization_complete:
+                    return
+                self._initialization_attempts += 1
+                success = await self._initialize_once(schedule_retry=False)
+                if success:
+                    self._initialization_failed = False
+                    return
+                logger.warning(
+                    "LivingMemory 初始化重试失败: attempt=%s/%s",
+                    self._initialization_attempts,
+                    self._max_initialization_attempts,
+                )
+            current_interval = min(current_interval * 1.5, 30.0)
+
+        if not self._initialization_complete and not self._shutdown_requested:
+            self._initialization_failed = True
+            if not self.embedding_provider or not self.llm_provider:
+                missing = []
+                if not self.embedding_provider:
+                    missing.append("Embedding Provider（请配置向量嵌入模型）")
+                if not self.llm_provider:
+                    missing.append("LLM Provider（请配置语言模型）")
+                self._initialization_error = (
+                    "Provider 初始化超时。"
+                    f"未就绪 Provider: {', '.join(missing)}。"
+                    "请检查 provider_settings 配置和 AstrBot 默认 Provider。"
+                )
+            else:
+                self._initialization_error = (
+                    "初始化重试次数已耗尽。请检查 FAISS 环境和数据库状态。"
+                )
+            logger.error(self._initialization_error)
+
     def _start_retry_task_if_needed(self) -> None:
-        """启动后台重试任务（避免重复启动）"""
+        """Start one background retry task."""
+        if self._shutdown_requested:
+            return
         if self._retry_task and not self._retry_task.done():
             return
-
         self._retry_task = asyncio.create_task(self._retry_initialization())
         self._retry_task.add_done_callback(self._on_retry_task_done)
 
     def _on_retry_task_done(self, task: asyncio.Task) -> None:
-        """重试任务完成回调，回收状态并记录异常"""
+        """Release retry-task state and report unexpected task errors."""
         self._retry_task = None
         if task.cancelled():
             return
@@ -177,98 +257,25 @@ class PluginInitializer:
             if exc:
                 logger.error(f"Provider 重试任务异常退出: {exc}")
         except Exception:
-            # 防御性处理：读取 task.exception() 时不应阻断主流程
-            pass
+            logger.debug("读取初始化重试任务状态失败", exc_info=True)
 
     async def _wait_for_providers_non_blocking(self, max_wait: float = 5.0) -> bool:
-        """非阻塞地检查 Provider 是否可用"""
+        """Check providers for a short period without blocking the event loop."""
         start_time = time.time()
-        check_interval = 1.0
-
         while time.time() - start_time < max_wait:
             self._initialize_providers(silent=True)
-
             if self.embedding_provider and self.llm_provider:
-                logger.info(
-                    "Provider check passed: embedding and llm providers are ready."
-                )
                 self._providers_ready = True
                 return True
-
-            await asyncio.sleep(check_interval)
+            await asyncio.sleep(1.0)
             self._provider_check_attempts += 1
-
         logger.debug(
-            f"Provider 在 {max_wait}秒内未就绪（已尝试 {self._provider_check_attempts} 次）"
-            f"：embedding={'ready' if self.embedding_provider else 'not ready'}, "
-            f"llm={'ready' if self.llm_provider else 'not ready'}"
+            "Provider 暂未就绪: embedding=%s, llm=%s, attempts=%s",
+            bool(self.embedding_provider),
+            bool(self.llm_provider),
+            self._provider_check_attempts,
         )
         return False
-
-    async def _retry_initialization(self):
-        """后台重试初始化任务（指数退避策略）"""
-        base_interval = 2.0
-        max_interval = 30.0
-        current_interval = base_interval
-        log_interval = 5
-
-        while (
-            not self._initialization_complete
-            and not self._initialization_failed
-            and self._provider_check_attempts < self._max_provider_attempts
-        ):
-            await asyncio.sleep(current_interval)
-
-            self._initialize_providers(silent=True)
-            self._provider_check_attempts += 1
-
-            if self._provider_check_attempts % log_interval == 0:
-                missing = []
-                if not self.embedding_provider:
-                    missing.append("Embedding Provider")
-                if not self.llm_provider:
-                    missing.append("LLM Provider")
-                logger.info(
-                    f"等待 Provider 就绪（未就绪: {', '.join(missing)}）..."
-                    f"（已尝试 {self._provider_check_attempts}/{self._max_provider_attempts} 次，"
-                    f"下次重试间隔 {current_interval:.1f}s）"
-                )
-
-            if self.embedding_provider and self.llm_provider:
-                logger.info(
-                    f"Provider 在第 {self._provider_check_attempts} 次尝试后就绪，继续初始化。"
-                )
-                self._providers_ready = True
-
-                try:
-                    async with self._initialization_lock:
-                        if not self._initialization_complete:
-                            await self._complete_initialization()
-                except Exception as e:
-                    logger.error(f"重试初始化失败: {e}", exc_info=True)
-                    self._initialization_failed = True
-                    self._initialization_error = str(e)
-                break
-
-            # 指数退避，最大30秒
-            current_interval = min(current_interval * 1.5, max_interval)
-
-        if not self._initialization_complete and not self._initialization_failed:
-            missing = []
-            if not self.embedding_provider:
-                missing.append("Embedding Provider（请配置向量嵌入模型）")
-            if not self.llm_provider:
-                missing.append("LLM Provider（请配置语言模型）")
-            logger.error(
-                f"以下 Provider 在 {self._provider_check_attempts} 次尝试后仍未就绪，初始化失败: "
-                f"{', '.join(missing) if missing else '未知'}"
-            )
-            self._initialization_failed = True
-            self._initialization_error = (
-                "Provider 初始化超时。"
-                f"未就绪 Provider: {', '.join(missing) if missing else '未知'}。"
-                "请检查 provider_settings 配置和 AstrBot 默认 Provider。"
-            )
 
     def _initialize_providers(self, silent: bool = False):
         """初始化 Embedding 和 LLM provider"""
@@ -441,6 +448,9 @@ class PluginInitializer:
         FaissVecDB = LoadedFaissVecDB
         return LoadedFaissVecDB
 
+    @with_sqlite_lock(
+        lambda self, *args, **kwargs: Path(self.data_dir) / "livingmemory.db"
+    )
     async def _complete_initialization(self):
         """完成完整的初始化流程"""
         if self._initialization_complete:
@@ -461,6 +471,14 @@ class PluginInitializer:
                 raise ProviderNotReadyError("Embedding Provider 未初始化")
             if not self.llm_provider or not isinstance(self.llm_provider, Provider):
                 raise ProviderNotReadyError("LLM Provider 未初始化或类型不正确")
+
+            # 在 SQLAlchemy/FAISS 建立长期连接前校验 SQLite；已知派生索引可安全重建。
+            self.db_migration = DBMigration(str(db_path))
+            validate_indexes = getattr(
+                self.db_migration, "validate_and_repair_known_indexes", None
+            )
+            if callable(validate_indexes):
+                await validate_indexes()
 
             faiss_vec_db_cls = self._load_faiss_vec_db_class()
 
@@ -484,9 +502,6 @@ class PluginInitializer:
                 )
                 await self.graph_db.initialize()
             logger.info(f"数据库已初始化。数据目录: {self.data_dir}")
-
-            # 初始化数据库迁移管理器
-            self.db_migration = DBMigration(str(db_path))
 
             # 检查并执行数据库迁移
             if self.config_manager.get("migration_settings.auto_migrate", True):
@@ -692,11 +707,67 @@ class PluginInitializer:
 
         except Exception as e:
             logger.error(f"完整初始化流程失败: {e}", exc_info=True)
-            self._initialization_failed = True
             self._initialization_error = str(e)
             raise InitializationError(f"初始化失败: {e}") from e
 
-    async def _check_and_migrate_database(self):
+    async def _teardown_partial_initialization(self) -> None:
+        """Release every component created by an initialization attempt."""
+        decay_scheduler = self.decay_scheduler
+        self.decay_scheduler = None
+        if decay_scheduler is not None:
+            try:
+                await decay_scheduler.stop()
+            except Exception:
+                logger.warning("停止 DecayScheduler 失败", exc_info=True)
+
+        conversation_manager = self.conversation_manager
+        self.conversation_manager = None
+        conversation_store = getattr(conversation_manager, "store", None)
+        if conversation_store is not None:
+            try:
+                await conversation_store.close()
+            except Exception:
+                logger.warning("关闭 ConversationStore 失败", exc_info=True)
+
+        memory_engine = self.memory_engine
+        self.memory_engine = None
+        if memory_engine is not None:
+            try:
+                await memory_engine.close()
+            except Exception:
+                logger.warning("关闭 MemoryEngine 失败", exc_info=True)
+
+        graph_db = self.graph_db
+        self.graph_db = None
+        if graph_db is not None:
+            try:
+                await graph_db.close()
+            except Exception:
+                logger.warning("关闭图向量数据库失败", exc_info=True)
+
+        db = self.db
+        self.db = None
+        if db is not None:
+            try:
+                await db.close()
+            except Exception:
+                logger.warning("关闭主向量数据库失败", exc_info=True)
+
+        self.memory_processor = None
+        self.db_migration = None
+        self.index_validator = None
+        self._initialization_complete = False
+
+    async def teardown(self) -> None:
+        """Stop retries and idempotently release all initialized resources."""
+        await self.stop_background_tasks()
+        async with self._initialization_lock:
+            await self._teardown_partial_initialization()
+            self.embedding_provider = None
+            self.llm_provider = None
+            self._providers_ready = False
+
+    async def _check_and_migrate_database(self) -> None:
         """检查并执行数据库迁移"""
         try:
             if not self.db_migration:
@@ -940,6 +1011,7 @@ class PluginInitializer:
 
     async def stop_background_tasks(self) -> None:
         """停止初始化阶段的后台任务（如Provider重试）"""
+        self._shutdown_requested = True
         if self._retry_task and not self._retry_task.done():
             self._retry_task.cancel()
             try:

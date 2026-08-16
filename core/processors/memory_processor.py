@@ -382,6 +382,7 @@ class MemoryProcessor:
         messages: list[Message],
         is_group_chat: bool = False,
         persona_id: str | None = None,
+        emotion_review_context: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, Any], float]:
         """
         处理对话历史,生成结构化记忆
@@ -405,6 +406,7 @@ class MemoryProcessor:
 
         # 1. 格式化对话历史
         conversation_text = self._format_conversation(messages)
+        emotion_source_has_text = self._has_emotion_source_text(messages)
 
         # 2. 选择合适的提示词模板
         # 使用 replace 而非 format，避免对话内容中的大括号导致解析错误
@@ -414,6 +416,22 @@ class MemoryProcessor:
         else:
             prompt = self.private_chat_prompt.replace(
                 "{conversation}", conversation_text
+            )
+        if not is_group_chat and emotion_review_context:
+            review_json = json.dumps(
+                emotion_review_context, ensure_ascii=False, default=str
+            )[:6000]
+            prompt += (
+                "\n\n# 当前角色心理事件与待关注事项复核目录（只读）\n"
+                "请优先复核或合并同主题情绪事件；普通生活和互动可作为episodic近期片段。"
+                "复核既有情绪事件必须原样使用 event_id 与 event_version，"
+                "复核既有待关注事项必须原样使用 item_id 与 item_version，"
+                "不要凭空创造任何ID。"
+                "对已有事项的询问、引用、复述或纠错不能创建新事项；"
+                "用户明确指出事项记错、已经完成或不再需要时，必须对目录中的原ID执行"
+                "cancel、complete或supersede。AI自己的错误建议和未获用户确认的临时承诺"
+                "不能成为新事项。\n"
+                f"{review_json}"
             )
         # 注入当前日期，让 LLM 能将相对时间转换为绝对日期
         prompt = prompt.replace("{current_date}", current_date)
@@ -445,6 +463,17 @@ class MemoryProcessor:
 
             # 4. 解析LLM响应
             structured_data = self._parse_llm_response(llm_response_text, is_group_chat)
+            if not is_group_chat:
+                structured_data["emotional_observations"] = (
+                    self._filter_emotional_observations_by_source(
+                        structured_data.get("emotional_observations", []), messages
+                    )
+                )
+                structured_data["attention_observations"] = (
+                    self._filter_attention_observations_by_source(
+                        structured_data.get("attention_observations", []), messages
+                    )
+                )
 
             # 4.5 质量校验
             quality = self._validate_summary_quality(structured_data)
@@ -465,6 +494,7 @@ class MemoryProcessor:
             )
             # 将质量标记写入 metadata
             metadata["summary_quality"] = structured_data.get("_quality", "normal")
+            metadata["emotion_source_has_text"] = emotion_source_has_text
 
             importance = float(structured_data.get("importance", 0.5))
 
@@ -516,6 +546,204 @@ class MemoryProcessor:
                     f"[_format_conversation] 消息#{i} 格式化结果(私聊): {sender_info[:50]}..."
                 )
         return "\n".join(formatted_lines)
+
+    @staticmethod
+    def _is_attack_observation(observation: dict[str, Any]) -> bool:
+        tags = {
+            str(tag).strip().lower()
+            for tag in observation.get("tags", [])
+            if str(tag).strip()
+        }
+        text = " ".join(
+            str(observation.get(field, ""))
+            for field in ("fact", "emotional_meaning", "evidence_quote")
+        )
+        return bool(
+            tags & {"abuse", "attack", "insult", "negative_attack"}
+            or re.search(r"恶心|滚开|去死|废物|臭烘烘|臭死|烦死|讨厌", text)
+        )
+
+    @staticmethod
+    def _infer_attack_target(evidence_quote: str) -> tuple[str, str]:
+        clean = re.sub(r"\s+", " ", str(evidence_quote or "")).strip()
+        if not re.search(r"恶心|滚开|去死|废物|臭烘烘|臭死|烦死|讨厌", clean):
+            return "unknown", "no_attack_evidence"
+        third_party = re.compile(
+            r"(?:地铁|车站|公交|路上|公司|学校|医院|店里|网上|评论区|新闻|"
+            r"群里|视频里|照片里|别人|他人|某个|一个|那个|这位|那位).{0,32}"
+            r"(?:老头|老太太|男人|女人|男的|女的|女生|男生|那个人|某人|路人|"
+            r"乘客|店员|同事|老板|孩子|小孩|人)"
+            r"|(?:老头|老太太|男人|女人|男的|女的|女生|男生|那个人|某人|路人|"
+            r"乘客|店员|同事|老板|孩子|小孩).{0,24}(?:身上|很|太|真|特别|恶心|臭|烦|讨厌)"
+            r"|(?:碰到|遇到|看见|看到|闻到).{0,32}(?:恶心|臭烘烘|臭死|讨厌)"
+        )
+        if third_party.search(clean):
+            return "third_party", "explicit_third_party_subject"
+        if re.search(
+            r"(?:^|[\s，。！？!?；;])你(?:这个|这|真|太|好|怎么|可真|真的)?",
+            clean,
+        ):
+            return "user", "explicit_user_subject"
+        return "unknown", "no_explicit_subject"
+
+    @classmethod
+    def _filter_emotional_observations_by_source(
+        cls,
+        observations: Any,
+        messages: list[Message],
+    ) -> list[dict[str, Any]]:
+        """Accept hostile relationship events only with exact direct user evidence."""
+        if not isinstance(observations, list):
+            return []
+        user_messages = [
+            message
+            for message in messages
+            if message.role != "assistant"
+            and not message.metadata.get("is_bot_message", False)
+        ]
+        accepted: list[dict[str, Any]] = []
+        for observation in observations:
+            if not isinstance(observation, dict):
+                continue
+            if not cls._is_attack_observation(observation):
+                accepted.append(observation)
+                continue
+
+            quote = str(observation.get("evidence_quote", "")).strip()
+            speaker = str(observation.get("evidence_speaker", "")).strip().lower()
+            target = str(observation.get("target", "unknown")).strip().lower()
+            if not quote or speaker != "user" or target != "user":
+                continue
+            direct_evidence = False
+            for message in user_messages:
+                text = cls._message_content_to_text(message.content).strip()
+                quoted_texts = [
+                    str(item).strip()
+                    for item in message.metadata.get("quoted_texts", [])
+                    if str(item).strip()
+                ]
+                direct_text = text
+                for quoted in quoted_texts:
+                    direct_text = direct_text.replace(quoted, " ")
+                direct_text = re.sub(r"\[引用(?::|消息).*?\]", " ", direct_text)
+                if quote in direct_text:
+                    direct_evidence = True
+                    break
+            if not direct_evidence:
+                continue
+            inferred_target, target_basis = cls._infer_attack_target(quote)
+            if inferred_target != "user":
+                continue
+            normalized = dict(observation)
+            normalized["target"] = "user"
+            normalized["target_basis"] = target_basis
+            accepted.append(normalized)
+        return accepted
+
+    @classmethod
+    def _filter_attention_observations_by_source(
+        cls,
+        observations: Any,
+        messages: list[Message],
+    ) -> list[dict[str, Any]]:
+        """Require exact user evidence and reject clearly short-lived or quoted tasks."""
+        if not isinstance(observations, list):
+            return []
+        speaker_texts = {
+            "user": [
+                cls._message_content_to_text(message.content).strip()
+                for message in messages
+                if message.role != "assistant"
+                and not message.metadata.get("is_bot_message", False)
+            ],
+            "assistant": [
+                cls._message_content_to_text(message.content).strip()
+                for message in messages
+                if message.role == "assistant"
+                or message.metadata.get("is_bot_message", False)
+            ],
+        }
+        speaker_texts["both"] = speaker_texts["user"] + speaker_texts["assistant"]
+        immediate = re.compile(
+            r"(?:等一下|一会儿|待会儿|马上|现在|正在).{0,28}"
+            r"(?:发|拍|聊|说|做|去|给|看|回复)"
+        )
+        quoted_or_corrected = re.compile(
+            r"(?:有个|这个|那个).{0,12}(?:计划|约定|事项).{0,20}"
+            r"(?:能看见|看得到|还在吗)|"
+            r"(?:插件|模型|你).{0,16}(?:记错|说错|弄错|发癫)|"
+            r"(?:不是|并非).{0,8}(?:计划|约定)"
+        )
+        assistant_noise = re.compile(
+            r"(?:记错|说错|弄错|发癫|猜测|猜想|可能|也许|不确定|临时承诺)"
+        )
+        accepted: list[dict[str, Any]] = []
+        for observation in observations:
+            if not isinstance(observation, dict):
+                continue
+            quote = str(observation.get("evidence_quote", "")).strip()
+            speaker = str(observation.get("evidence_speaker", "")).strip().lower()
+            if speaker not in speaker_texts or not quote:
+                continue
+            if not any(quote in text for text in speaker_texts[speaker]):
+                continue
+            if observation.get("action") == "create":
+                status = str(observation.get("status", "open")).strip().lower()
+                evidence = f"{quote} {observation.get('content', '')}"
+                if immediate.search(evidence) or quoted_or_corrected.search(evidence):
+                    continue
+                if status == "proposed":
+                    if speaker == "assistant" and assistant_noise.search(evidence):
+                        continue
+                elif speaker != "user":
+                    continue
+            elif observation.get("action") == "complete":
+                if speaker not in {"user", "assistant", "both"}:
+                    continue
+            elif speaker != "user":
+                continue
+            accepted.append(observation)
+        return accepted
+
+    @classmethod
+    def _has_emotion_source_text(cls, messages: list[Message]) -> bool:
+        placeholders = re.compile(r"\[(?:图片|视频|语音|文件)(?:消息|:[^\]]*)?\]", re.I)
+        for message in messages:
+            is_bot = message.role == "assistant" or message.metadata.get(
+                "is_bot_message", False
+            )
+            if is_bot:
+                continue
+            clean = cls._message_content_to_text(message.content)
+            clean = re.sub(
+                r"<!--\s*astrbot-chat-merger:image-context(?::[^>]*)?-->.*?"
+                r"<!--\s*/?astrbot-chat-merger:image-context(?::[^>]*)?-->",
+                " ",
+                clean,
+                flags=re.DOTALL | re.I,
+            )
+            clean = re.sub(
+                r"<!--\s*astrbot-chat-merger:image-context(?::[^>]*)?-->.*$",
+                " ",
+                clean,
+                flags=re.DOTALL | re.I,
+            )
+            clean = re.sub(
+                r"<image_context\b[^>]*>.*?</image_context>",
+                " ",
+                clean,
+                flags=re.DOTALL | re.I,
+            )
+            clean = re.sub(
+                r"<image_context\b[^>]*>.*$",
+                " ",
+                clean,
+                flags=re.DOTALL | re.I,
+            )
+            clean = placeholders.sub(" ", clean)
+            if re.sub(r"[\W_]+", "", clean, flags=re.UNICODE):
+                return True
+        return False
 
     @staticmethod
     def _format_sender_info(msg: Message) -> str:
@@ -624,6 +852,16 @@ class MemoryProcessor:
 
             data["importance"] = self._validate_importance(data.get("importance", 0.5))
             logger.debug(f"[MemoryProcessor] 提取 importance: {data['importance']}")
+
+            data["emotional_observations"] = self._normalize_emotional_observations(
+                data.get("emotional_observations", []), is_group_chat
+            )
+            data["attention_observations"] = self._normalize_attention_observations(
+                data.get("attention_observations", []), is_group_chat
+            )
+            data["mood_adjustment"] = self._normalize_mood_adjustment(
+                data.get("mood_adjustment", {}), is_group_chat
+            )
 
             if is_group_chat:
                 data["participants"] = self._ensure_list(data.get("participants", []))
@@ -754,7 +992,7 @@ class MemoryProcessor:
         except Exception as e:
             logger.error(f"[MemoryProcessor]  正则提取失败: {e}", exc_info=True)
 
-        return data
+        return self._normalize_parsed_data(data, is_group_chat)
 
     def _build_storage_format(
         self,
@@ -773,21 +1011,24 @@ class MemoryProcessor:
         Returns:
             (content, metadata) 元组
         """
-        summary = structured_data.get("summary", "")
+        summary = str(structured_data.get("summary", "")).strip()
         key_facts = structured_data.get("key_facts", [])
 
-        # canonical_summary：事实导向、风格中性，用于检索
-        # 由 summary + key_facts 拼接，去除人格语气词
-        canonical_parts = [summary] if summary else []
+        # content is both vector/BM25 corpus and tool recall output, so keep the
+        # personality summary and concrete facts together instead of competing.
+        rich_parts = [summary] if summary else []
         if key_facts:
-            canonical_parts.append("；".join(str(f) for f in key_facts[:5]))
-        canonical_summary = " | ".join(canonical_parts) if canonical_parts else ""
+            rich_parts.append("；".join(str(f) for f in key_facts[:5] if f))
+        rich_content = " | ".join(rich_parts)
+        content = rich_content if rich_content else fallback_excerpt
 
-        # content 字段使用 canonical_summary，提升检索稳定性
-        if canonical_summary:
-            content = canonical_summary
-        else:
-            content = fallback_excerpt
+        # Custom prompts may still provide a neutral summary for graph consumers.
+        # Built-in prompts omit it, preserving the v2 field with rich text fallback.
+        canonical_summary = str(
+            structured_data.get("canonical_summary") or ""
+        ).strip()
+        if not canonical_summary:
+            canonical_summary = rich_content
 
         # metadata字段:存储结构化信息
         # 注意：不要在这里设置 create_time 和 last_access_time
@@ -797,10 +1038,20 @@ class MemoryProcessor:
             "key_facts": key_facts,
             "sentiment": structured_data.get("sentiment", "neutral"),
             "interaction_type": "group_chat" if is_group_chat else "private_chat",
-            # 双通道：canonical 用于检索，persona_summary 保留原始人格风格摘要
+            # canonical_summary is retained for neutral-text consumers such as
+            # graph extraction; persona_summary preserves the styled memory.
             "canonical_summary": canonical_summary,
             "persona_summary": summary,
             "summary_schema_version": "v2",
+            "emotional_observations": self._normalize_emotional_observations(
+                structured_data.get("emotional_observations", []), is_group_chat
+            ),
+            "attention_observations": self._normalize_attention_observations(
+                structured_data.get("attention_observations", []), is_group_chat
+            ),
+            "mood_adjustment": self._normalize_mood_adjustment(
+                structured_data.get("mood_adjustment", {}), is_group_chat
+            ),
             # summary_quality 由 process_conversation 中的 SummaryValidator 覆盖写入
         }
 
@@ -833,11 +1084,197 @@ class MemoryProcessor:
         data["key_facts"] = self._ensure_list(data.get("key_facts", []))[:5]
         data["sentiment"] = self._validate_sentiment(data.get("sentiment", "neutral"))
         data["importance"] = self._validate_importance(data.get("importance", 0.5))
+        data["emotional_observations"] = self._normalize_emotional_observations(
+            data.get("emotional_observations", []), is_group_chat
+        )
+        data["attention_observations"] = self._normalize_attention_observations(
+            data.get("attention_observations", []), is_group_chat
+        )
+        data["mood_adjustment"] = self._normalize_mood_adjustment(
+            data.get("mood_adjustment", {}), is_group_chat
+        )
 
         if is_group_chat:
             data["participants"] = self._ensure_list(data.get("participants", []))
 
         return data
+
+    @staticmethod
+    def _normalize_emotional_observations(
+        value: Any, is_group_chat: bool
+    ) -> list[dict[str, Any]]:
+        """Keep optional private emotional suggestions isolated from memory parsing."""
+        if is_group_chat or not isinstance(value, list):
+            return []
+        actions = {
+            "create",
+            "merge",
+            "intensify",
+            "ease",
+            "dormant",
+            "archive",
+            "retain",
+        }
+        categories = {"transient", "episodic", "psychological", "concrete"}
+        result: list[dict[str, Any]] = []
+        for raw in value[:6]:
+            if not isinstance(raw, dict):
+                continue
+            action = str(raw.get("action", "create")).strip().lower()
+            event_id = str(raw.get("event_id", "")).strip()[:80]
+            try:
+                event_version = (
+                    int(raw["event_version"])
+                    if raw.get("event_version") is not None
+                    else None
+                )
+            except (TypeError, ValueError):
+                event_version = None
+            fact = str(raw.get("fact", "")).strip()[:240]
+            if action not in actions:
+                continue
+            if action == "create" and not fact:
+                continue
+            if action != "create" and (not event_id or event_version is None):
+                continue
+            try:
+                valence = min(1.0, max(-1.0, float(raw.get("valence", 0.0))))
+                intensity = min(1.0, max(0.0, float(raw.get("intensity", 0.35))))
+                confidence = min(1.0, max(0.0, float(raw.get("confidence", 0.5))))
+            except (TypeError, ValueError):
+                continue
+            category = str(raw.get("category", "concrete")).strip().lower()
+            if category not in categories:
+                category = "concrete"
+            result.append(
+                {
+                    "action": action,
+                    "event_id": event_id,
+                    "event_version": event_version,
+                    "fact": fact,
+                    "emotional_meaning": str(
+                        raw.get("emotional_meaning", "这段互动可能影响当前心境")
+                    )[:240],
+                    "target": str(raw.get("target", "unknown"))[:80],
+                    "target_basis": str(raw.get("target_basis", ""))[:120],
+                    "evidence_quote": str(raw.get("evidence_quote", ""))[:240],
+                    "evidence_speaker": str(raw.get("evidence_speaker", ""))
+                    .strip()
+                    .lower()[:24],
+                    "category": category,
+                    "valence": valence,
+                    "intensity": intensity,
+                    "confidence": confidence,
+                    "uncertain": bool(raw.get("uncertain", confidence < 0.62)),
+                    "note": str(raw.get("note", ""))[:240],
+                    "tags": [str(tag)[:40] for tag in raw.get("tags", [])[:5]]
+                    if isinstance(raw.get("tags", []), list)
+                    else [],
+                }
+            )
+        return result
+
+    @staticmethod
+    def _normalize_attention_observations(
+        value: Any, is_group_chat: bool
+    ) -> list[dict[str, Any]]:
+        """Normalize explicit, durable private attention-item suggestions."""
+        if is_group_chat or not isinstance(value, list):
+            return []
+        actions = {"create", "confirm", "update", "complete", "cancel", "supersede"}
+        kinds = {"commitment", "plan", "remember", "follow_up"}
+        statuses = {"proposed", "open", "completed", "cancelled", "superseded"}
+        result: list[dict[str, Any]] = []
+        for raw in value[:6]:
+            if not isinstance(raw, dict):
+                continue
+            action = str(raw.get("action", "create")).strip().lower()
+            item_id = str(raw.get("item_id", "")).strip()[:80]
+            content = str(raw.get("content", "")).strip()[:240]
+            evidence_quote = str(raw.get("evidence_quote", "")).strip()[:240]
+            evidence_speaker = str(raw.get("evidence_speaker", "")).strip().lower()[:24]
+            explicit = bool(raw.get("explicit", False))
+            try:
+                item_version = (
+                    int(raw["item_version"])
+                    if raw.get("item_version") is not None
+                    else None
+                )
+                confidence = min(1.0, max(0.0, float(raw.get("confidence", 0.0))))
+            except (TypeError, ValueError):
+                continue
+            if action not in actions or not evidence_quote:
+                continue
+            kind = str(raw.get("kind", "follow_up")).strip().lower()
+            status = str(raw.get("status", "open")).strip().lower()
+            if status not in statuses:
+                status = "open"
+            if action == "create" and (
+                not content
+                or not evidence_quote
+                or confidence < (0.62 if status == "proposed" else 0.82)
+                or (
+                    status != "proposed"
+                    and (not explicit or evidence_speaker != "user")
+                )
+                or (
+                    status == "proposed"
+                    and evidence_speaker not in {"user", "assistant", "both"}
+                )
+            ):
+                continue
+            if action != "create" and (
+                not item_id
+                or item_version is None
+                or confidence < 0.78
+                or (
+                    action != "complete"
+                    and evidence_speaker != "user"
+                )
+                or (
+                    action == "complete"
+                    and evidence_speaker not in {"user", "assistant", "both"}
+                )
+            ):
+                continue
+            result.append(
+                {
+                    "action": action,
+                    "item_id": item_id,
+                    "item_version": item_version,
+                    "content": content,
+                    "kind": kind if kind in kinds else "follow_up",
+                    "status": status if status in statuses else "open",
+                    "actor": str(raw.get("actor", "both"))[:40],
+                    "time_hint": str(raw.get("time_hint", ""))[:80],
+                    "due_at": str(raw.get("due_at", ""))[:64],
+                    "confidence": confidence,
+                    "explicit": explicit,
+                    "evidence_quote": evidence_quote,
+                    "evidence_speaker": evidence_speaker,
+                    "note": str(raw.get("note", ""))[:240],
+                }
+            )
+        return result
+
+    @staticmethod
+    def _normalize_mood_adjustment(value: Any, is_group_chat: bool) -> dict[str, Any]:
+        """Normalize an optional private mood proposal without affecting memory storage."""
+        if is_group_chat or not isinstance(value, dict):
+            return {}
+        try:
+            confidence = min(1.0, max(0.0, float(value.get("confidence", 0.0))))
+            if confidence <= 0.0:
+                return {}
+            return {
+                "valence": min(1.0, max(-1.0, float(value.get("valence", 0.0)))),
+                "energy": min(1.0, max(0.0, float(value.get("energy", 0.45)))),
+                "tension": min(1.0, max(0.0, float(value.get("tension", 0.2)))),
+                "label": str(value.get("label", "")).strip()[:40],
+                "confidence": confidence,
+            }
+        except (TypeError, ValueError):
+            return {}
 
     def _ensure_list(self, value: Any) -> list[str]:
         """确保值是字符串列表"""

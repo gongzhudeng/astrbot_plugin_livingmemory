@@ -13,6 +13,7 @@ import aiosqlite
 from astrbot.api import logger
 
 from ..processors.text_processor import TextProcessor
+from ...storage.sqlite_utils import sqlite_connection
 
 
 @dataclass
@@ -58,14 +59,9 @@ class BM25Retriever:
 
     @asynccontextmanager
     async def _connect(self):
-        """创建新的SQLite连接并启用WAL模式和busy_timeout。"""
-        db = await aiosqlite.connect(self.db_path)
-        try:
-            await db.execute("PRAGMA journal_mode = WAL")
-            await db.execute("PRAGMA busy_timeout = 10000")
+        """Create a configured SQLite connection under the shared path lock."""
+        async with sqlite_connection(self.db_path) as db:
             yield db
-        finally:
-            await db.close()
 
     async def initialize(self):
         """

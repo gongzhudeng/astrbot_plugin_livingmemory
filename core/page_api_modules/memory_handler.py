@@ -10,6 +10,8 @@ from quart import request
 
 from astrbot.api import logger
 
+from ...storage.sqlite_utils import sqlite_connection
+
 if TYPE_CHECKING:
     from .utils import PageApiUtils
 
@@ -182,7 +184,7 @@ class MemoryHandler:
             sort_expr = sort_options[sort_key]
 
         try:
-            async with aiosqlite.connect(db_path) as db:
+            async with sqlite_connection(db_path) as db:
                 db.row_factory = aiosqlite.Row
 
                 count_cursor = await db.execute(
@@ -605,7 +607,7 @@ class MemoryHandler:
             return None
 
         try:
-            async with aiosqlite.connect(db_path) as db:
+            async with sqlite_connection(db_path) as db:
                 db.row_factory = aiosqlite.Row
                 cursor = await db.execute(
                     """

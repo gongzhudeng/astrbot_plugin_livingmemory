@@ -160,6 +160,22 @@ class ConversationManager:
             else "unknown"
         )
 
+        message_metadata: dict[str, Any] = {}
+        get_messages = getattr(event, "get_messages", None)
+        components = get_messages() if callable(get_messages) else []
+        quoted_texts = [
+            str(getattr(component, "message_str", "") or "").strip()[:500]
+            for component in components or []
+            if component.__class__.__name__ == "Reply"
+            and str(getattr(component, "message_str", "") or "").strip()
+        ]
+        if any(
+            component.__class__.__name__ == "Reply" for component in components or []
+        ):
+            message_metadata["has_reply"] = True
+        if quoted_texts:
+            message_metadata["quoted_texts"] = quoted_texts[:3]
+
         return await self.add_message(
             session_id=session_id,
             role=role,
@@ -169,6 +185,7 @@ class ConversationManager:
             group_id=group_id,
             platform=platform,
             is_bot_message=(role == "assistant"),
+            metadata=message_metadata,
         )
 
     async def add_message(
@@ -181,6 +198,7 @@ class ConversationManager:
         group_id: str | None = None,
         platform: str = "unknown",
         is_bot_message: bool = False,
+        metadata: dict[str, Any] | None = None,
     ) -> Message:
         """
         添加消息到会话
@@ -212,7 +230,10 @@ class ConversationManager:
             group_id=group_id,
             platform=platform,
             timestamp=time.time(),
-            metadata={"is_bot_message": True} if is_bot_message else {},
+            metadata={
+                **({"is_bot_message": True} if is_bot_message else {}),
+                **(metadata or {}),
+            },
         )
 
         # 存储到数据库

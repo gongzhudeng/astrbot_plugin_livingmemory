@@ -5,11 +5,11 @@ import json
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-from astrbot.api.platform import MessageType
-
 from astrbot_plugin_livingmemory.core.tools.memory_memorize_tool import (
     MemoryMemorizeTool,
 )
+
+from astrbot.api.platform import MessageType
 
 
 @pytest.fixture
@@ -151,9 +151,12 @@ async def test_memory_memorize_tool_detects_group_chat(memory_engine, memory_pro
             memory="群里约定周五复盘",
         )
 
-    assert memory_processor.build_memory_from_structured_data.call_args.kwargs[
-        "is_group_chat"
-    ] is True
+    assert (
+        memory_processor.build_memory_from_structured_data.call_args.kwargs[
+            "is_group_chat"
+        ]
+        is True
+    )
 
 
 @pytest.mark.asyncio
@@ -177,9 +180,11 @@ async def test_memory_memorize_tool_normalizes_invalid_sentiment(
             sentiment="SURPRISED",
         )
 
-    structured_data = memory_processor.build_memory_from_structured_data.call_args.kwargs[
-        "structured_data"
-    ]
+    structured_data = (
+        memory_processor.build_memory_from_structured_data.call_args.kwargs[
+            "structured_data"
+        ]
+    )
     assert structured_data["sentiment"] == "neutral"
 
 
@@ -204,9 +209,11 @@ async def test_memory_memorize_tool_handles_non_string_sentiment(
             sentiment=1,
         )
 
-    structured_data = memory_processor.build_memory_from_structured_data.call_args.kwargs[
-        "structured_data"
-    ]
+    structured_data = (
+        memory_processor.build_memory_from_structured_data.call_args.kwargs[
+            "structured_data"
+        ]
+    )
     assert structured_data["sentiment"] == "neutral"
 
 

@@ -90,7 +90,7 @@ elif _version_lt(_CURRENT_ASTRBOT_VERSION, _MIN_ASTRBOT_VERSION):
     "LivingMemory",
     "灵犀",
     "An intelligent long-term memory plugin with a dynamic lifecycle for AstrBot.",
-    "2.4.0",
+    "2.6.0-gd.2",
     "https://github.com/gongzhudeng/astrbot_plugin_livingmemory",
 )
 class LivingMemoryPlugin(Star):
@@ -114,6 +114,11 @@ class LivingMemoryPlugin(Star):
 
         # 初始化插件初始化器
         self.initializer = PluginInitializer(context, self.config_manager, data_dir)
+        set_initialized_callback = getattr(
+            self.initializer, "set_initialized_callback", None
+        )
+        if callable(set_initialized_callback):
+            set_initialized_callback(self._ensure_runtime_components)
 
         # 事件处理器和命令处理器（初始化后创建）
         self.event_handler: EventHandler | None = None
@@ -591,25 +596,20 @@ class LivingMemoryPlugin(Star):
         if self.event_handler:
             await self.event_handler.shutdown()
 
-        # 停止衰减调度器
-        await self.initializer.stop_scheduler()
-
-        # 关闭 ConversationManager
-        if (
-            self.initializer.conversation_manager
-            and self.initializer.conversation_manager.store
-        ):
-            await self.initializer.conversation_manager.store.close()
-            logger.info("ConversationManager 已关闭")
-
-        # 关闭 MemoryEngine
-        if self.initializer.memory_engine:
-            await self.initializer.memory_engine.close()
-            logger.info("MemoryEngine 已关闭")
-
-        # 关闭 FaissVecDB
-        if self.initializer.db:
-            await self.initializer.db.close()
-            logger.info("FaissVecDB 已关闭")
+        teardown = getattr(self.initializer, "teardown", None)
+        if callable(teardown):
+            await teardown()
+        else:
+            # Compatibility with older initializer implementations and test doubles.
+            await self.initializer.stop_scheduler()
+            if (
+                self.initializer.conversation_manager
+                and self.initializer.conversation_manager.store
+            ):
+                await self.initializer.conversation_manager.store.close()
+            if self.initializer.memory_engine:
+                await self.initializer.memory_engine.close()
+            if self.initializer.db:
+                await self.initializer.db.close()
 
         logger.info("LivingMemory 插件已成功停止。")

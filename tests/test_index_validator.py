@@ -2,31 +2,16 @@
 IndexValidator 测试。
 """
 
-import importlib.util
 import json
 import sqlite3
 import time
 from pathlib import Path
 
+import astrbot_plugin_livingmemory.core.validators.index_validator as index_validator_module
 import faiss
 import numpy as np
 import pytest
-
-
-def _load_index_validator_module():
-    module_path = (
-        Path(__file__).resolve().parents[1] / "core/validators/index_validator.py"
-    )
-    spec = importlib.util.spec_from_file_location("index_validator_module", module_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"无法加载模块: {module_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-index_validator_module = _load_index_validator_module()
-IndexValidator = index_validator_module.IndexValidator
+from astrbot_plugin_livingmemory.core.validators.index_validator import IndexValidator
 
 
 class _DummyTextProcessor:
@@ -56,7 +41,10 @@ class _DummyEmbeddingProvider:
         self.calls.append(list(contents))
         if any(content in self.fail_contents for content in contents):
             raise RuntimeError("模拟 embedding 批次失败")
-        return [[float(len(content)), float(index + 1)] for index, content in enumerate(contents)]
+        return [
+            [float(len(content)), float(index + 1)]
+            for index, content in enumerate(contents)
+        ]
 
 
 class _DummyEmbeddingStorage:
