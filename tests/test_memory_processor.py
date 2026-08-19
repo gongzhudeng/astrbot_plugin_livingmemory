@@ -1167,3 +1167,38 @@ def test_emotional_observation_normalization_preserves_attribution_fields():
     assert normalized[0]["target_basis"] == "explicit_user_subject"
     assert normalized[0]["evidence_quote"] == "你真恶心，滚开"
     assert normalized[0]["evidence_speaker"] == "user"
+
+
+def test_emotional_observation_preserves_complete_fact_past_240_chars():
+    processor = MemoryProcessor(llm_provider=None, context=None)
+    fact = "这是一段已经完整写完的情绪事实。" * 16
+    assert 240 < len(fact) < 600
+
+    normalized = processor._normalize_emotional_observations(
+        [{"action": "create", "fact": fact, "confidence": 0.9}],
+        is_group_chat=False,
+    )
+
+    assert normalized[0]["fact"] == fact
+
+
+def test_emotional_observation_overflow_uses_punctuation_boundary():
+    processor = MemoryProcessor(llm_provider=None, context=None)
+    fact = "这是一段完整的情绪事实。" * 70 + "我当这个残句不应该裸露"
+
+    normalized = processor._normalize_emotional_observations(
+        [{"action": "create", "fact": fact, "confidence": 0.9}],
+        is_group_chat=False,
+    )
+
+    bounded = normalized[0]["fact"]
+    assert len(bounded) <= 600
+    assert bounded.endswith("。…")
+    assert "我当" not in bounded
+
+
+def test_private_prompt_requires_complete_bounded_emotional_facts():
+    processor = MemoryProcessor(llm_provider=None, context=None)
+
+    assert "控制在320个中文字符以内" in processor.private_chat_prompt
+    assert "不能在半句话中间截断" in processor.private_chat_prompt

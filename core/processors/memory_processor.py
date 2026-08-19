@@ -16,6 +16,28 @@ from ..models.conversation_models import Message
 from ..models.memory_atom import MemoryAtom
 from .atom_classifier import classify_atoms
 
+EMOTIONAL_FACT_MAX_CHARS = 600
+
+
+def _bound_complete_text(text: str, max_chars: int) -> str:
+    """Bound generated text at a readable punctuation boundary."""
+    clean = str(text or "").strip()
+    limit = max(2, int(max_chars))
+    if len(clean) <= limit:
+        return clean
+
+    window = clean[: limit - 1].rstrip()
+    minimum_boundary = min(40, max(1, limit // 3))
+    for pattern, strip_chars in (
+        (re.compile(r"[。！？!?；;](?:[\"'”’」』】）)]*)"), ""),
+        (re.compile(r"[，,、：:](?:[\"'”’」』】）)]*)"), "，,、：:"),
+    ):
+        matches = list(pattern.finditer(window))
+        if matches and matches[-1].end() >= minimum_boundary:
+            prefix = window[: matches[-1].end()].rstrip(strip_chars).rstrip()
+            return f"{prefix}…"
+    return f"{window}…"
+
 
 class MemoryProcessor:
     """
@@ -1130,7 +1152,9 @@ class MemoryProcessor:
                 )
             except (TypeError, ValueError):
                 event_version = None
-            fact = str(raw.get("fact", "")).strip()[:240]
+            fact = _bound_complete_text(
+                raw.get("fact", ""), EMOTIONAL_FACT_MAX_CHARS
+            )
             if action not in actions:
                 continue
             if action == "create" and not fact:

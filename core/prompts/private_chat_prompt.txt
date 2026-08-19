@@ -53,7 +53,7 @@
       "action": "create|merge|retain|intensify|ease|dormant|archive",
       "event_id": "复核或合并既有事件时必须原样填写目录中的ID；create时留空",
       "event_version": "复核或合并既有事件时原样填写目录中的版本；create时为null",
-      "fact": "create或merge时填写本轮对话归纳后的事实；其他复核动作可留空",
+      "fact": "create或merge时填写本轮对话归纳后的完整事实，控制在320个中文字符以内并以完整句子结束；其他复核动作可留空",
       "emotional_meaning": "这段生活或互动对我当前心境的具体影响",
       "target": "user|third_party|unknown",
       "target_basis": "explicit_user_subject|explicit_third_party_subject|no_explicit_subject",
@@ -135,6 +135,7 @@
 - topics和key_facts最多各5项,应涵盖对话的核心要点
 - importance必须在0.0-1.0之间,保留1-2位小数
 - emotional_observations是私聊心理结算动作数组：
+  - `create`或`merge`的`fact`必须简洁、完整，控制在320个中文字符以内并以句号、问号、感叹号或分号结束；宁可压缩次要细节，也不能在半句话中间截断
   - 只要总结窗口含有真实生活或互动内容，至少执行一次合理的`create`、`merge`、`retain`、`intensify`、`ease`、`dormant`或`archive`；只有纯控制文本、纯媒体描述或无法判断互动对象时才输出空数组
   - `create`：普通上班、吃饭、睡觉、日常闲聊、打情骂俏和私密互动可创建`category:"episodic"`的近期片段；私密互动只保存克制概括，不复制露骨原文。承诺、关系变化和持续压力才使用`concrete`或`psychological`
   - 对象归因：`target`只能是`user`、`third_party`或`unknown`。只有原始非`[Bot:]`用户短句明确以“你……”指向当前聊天角色时，攻击性观察才能填写`target:"user"`，并必须同时逐字填写`evidence_quote`、`evidence_speaker:"user"`和`target_basis:"explicit_user_subject"`。模型自己的归纳、事实改写或单独声明`target:"user"`不构成证据。

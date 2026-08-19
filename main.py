@@ -90,7 +90,7 @@ elif _version_lt(_CURRENT_ASTRBOT_VERSION, _MIN_ASTRBOT_VERSION):
     "LivingMemory",
     "灵犀",
     "An intelligent long-term memory plugin with a dynamic lifecycle for AstrBot.",
-    "2.6.0-gd.2",
+    "2.6.0-gd.3",
     "https://github.com/gongzhudeng/astrbot_plugin_livingmemory",
 )
 class LivingMemoryPlugin(Star):
