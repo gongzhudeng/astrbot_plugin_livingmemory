@@ -3,6 +3,7 @@
 """
 
 import asyncio
+import inspect
 import json
 import random
 import re
@@ -83,6 +84,51 @@ class MemoryProcessor:
             return str(provider.meta().id)
         except Exception:
             return type(provider).__name__
+
+    def _summary_model_limits(self) -> tuple[int, float]:
+        """Return additional retries and per-call timeout for memory summaries."""
+        raw_retries = self.config.get("summary_model_max_retries", 1)
+        try:
+            retries = int(raw_retries)
+        except (TypeError, ValueError):
+            retries = 1
+        raw_timeout = self.config.get("summary_model_timeout_seconds", 120)
+        try:
+            timeout = float(raw_timeout)
+        except (TypeError, ValueError):
+            timeout = 120.0
+        return max(0, min(10, retries)), max(1.0, min(3600.0, timeout))
+
+    @staticmethod
+    def _supports_request_max_retries(provider: Any) -> bool:
+        """Detect lightweight test providers that expose no transport option."""
+        target = getattr(provider, "text_chat", None)
+        side_effect = getattr(target, "side_effect", None)
+        if callable(side_effect):
+            target = side_effect
+        try:
+            signature = inspect.signature(target)
+        except (TypeError, ValueError):
+            return True
+        return "request_max_retries" in signature.parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+
+    async def _text_chat_once(
+        self,
+        provider: Any,
+        *,
+        prompt: str,
+        system_prompt: str,
+    ) -> Any:
+        kwargs: dict[str, Any] = {
+            "prompt": prompt,
+            "system_prompt": system_prompt,
+        }
+        if self._supports_request_max_retries(provider):
+            kwargs["request_max_retries"] = 1
+        return await provider.text_chat(**kwargs)
 
     def _get_current_llm_providers(self) -> list[Any]:
         """Resolve the ordered provider chain without retaining stale instances."""
@@ -292,35 +338,61 @@ class MemoryProcessor:
         provider: Any,
         prompt: str,
         system_prompt: str,
-        max_retries: int,
+        max_retries: int | None = None,
     ) -> str:
         provider_name = self._provider_name(provider)
         last_error: Exception | None = None
-        for attempt in range(max_retries):
+        if max_retries is None:
+            additional_retries, timeout_seconds = self._summary_model_limits()
+        else:
+            # Preserve the old direct-call API: an explicit value represented
+            # total attempts. Plugin config uses additional retry semantics.
             try:
-                response = await provider.text_chat(
-                    prompt=prompt, system_prompt=system_prompt
+                additional_retries = max(0, int(max_retries) - 1)
+            except (TypeError, ValueError):
+                additional_retries = 0
+            _, timeout_seconds = self._summary_model_limits()
+        max_attempts = additional_retries + 1
+        for attempt in range(max_attempts):
+            started = asyncio.get_running_loop().time()
+            try:
+                response = await asyncio.wait_for(
+                    self._text_chat_once(
+                        provider,
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                    ),
+                    timeout=timeout_seconds,
                 )
                 response_text = getattr(response, "completion_text", "")
                 if not self._response_has_structured_payload(response_text):
                     raise ValueError("模型未返回可识别的结构化记忆")
+                logger.info(
+                    f"[MemoryProcessor] LLM Provider {provider_name} 总结成功，"
+                    f"尝试 {attempt + 1}/{max_attempts}，耗时 "
+                    f"{asyncio.get_running_loop().time() - started:.1f}s"
+                )
                 return response_text
+            except asyncio.TimeoutError:
+                last_error = TimeoutError(
+                    f"Provider {provider_name} 总结调用超过 {timeout_seconds:.1f}s"
+                )
             except Exception as e:
                 last_error = e
-                if attempt == max_retries - 1:
-                    break
-                wait_time = (2**attempt) + random.uniform(0, 1)
-                logger.warning(
-                    f"[MemoryProcessor] LLM Provider {provider_name} 调用失败，"
-                    f"{wait_time:.1f}s 后重试 ({attempt + 1}/{max_retries}): {e}"
-                )
-                await asyncio.sleep(wait_time)
+            if attempt == max_attempts - 1:
+                break
+            wait_time = (2**attempt) + random.uniform(0, 1)
+            logger.warning(
+                f"[MemoryProcessor] LLM Provider {provider_name} 调用失败，"
+                f"{wait_time:.1f}s 后重试 ({attempt + 1}/{additional_retries}): {last_error}"
+            )
+            await asyncio.sleep(wait_time)
         raise last_error or RuntimeError("LLM 调用失败，未捕获到具体异常")
 
     async def _call_llm_with_retry(
-        self, prompt: str, system_prompt: str, max_retries: int = 3
+        self, prompt: str, system_prompt: str, max_retries: int | None = None
     ) -> str:
-        """Try each configured provider in order, with retries per provider."""
+        """Try each configured provider in order, with configured retries per provider."""
         providers = self._get_current_llm_providers()
         if not providers:
             raise RuntimeError("LLM Provider 不可用")

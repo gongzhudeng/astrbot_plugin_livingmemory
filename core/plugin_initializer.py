@@ -661,6 +661,12 @@ class PluginInitializer:
                 fallback_provider_ids=fallback_llm_ids,
                 config={
                     "atom_enabled": memory_engine_config["atom_enabled"],
+                    "summary_model_max_retries": self.config_manager.get(
+                        "provider_settings.summary_model_max_retries", 1
+                    ),
+                    "summary_model_timeout_seconds": self.config_manager.get(
+                        "provider_settings.summary_model_timeout_seconds", 120
+                    ),
                 },
             )
             logger.info("MemoryProcessor 已初始化")

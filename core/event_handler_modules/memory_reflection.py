@@ -60,6 +60,15 @@ class MemoryReflection:
         self._storage_sessions_inflight = storage_sessions_inflight
         self._storage_state_lock = storage_state_lock
         self._shutting_down = False
+        try:
+            configured_attempts = int(
+                self.config_manager.get(
+                    "reflection_engine.pending_summary_max_attempts", 3
+                )
+            )
+        except (TypeError, ValueError):
+            configured_attempts = 3
+        self.pending_summary_max_attempts = max(1, min(20, configured_attempts))
 
     async def handle_memory_reflection(
         self, event: AstrMessageEvent, resp: LLMResponse
@@ -221,7 +230,7 @@ class MemoryReflection:
                     retry_count = pending_summary.get("retry_count", 0)
 
                     # 检查是否已达到最大重试次数
-                    if retry_count >= 3:
+                    if retry_count >= self.pending_summary_max_attempts:
                         logger.warning(
                             f"[{session_id}] 待处理总结已连续失败 {retry_count} 次，放弃该范围 "
                             f"[{pending_start}:{pending_summary.get('end_index', end_index)}]"
@@ -239,7 +248,7 @@ class MemoryReflection:
                     start_index = pending_start
                     logger.info(
                         f"[{session_id}] 合并待处理失败总结，新范围 [{start_index}:{end_index}], "
-                        f"重试次数: {retry_count + 1}/3"
+                        f"重试次数: {retry_count + 1}/{self.pending_summary_max_attempts}"
                     )
 
                 if end_index - start_index < 2:
@@ -438,7 +447,8 @@ class MemoryReflection:
                 except Exception as e:
                     # LLM处理失败，记录待重试信息
                     logger.error(
-                        f"[{session_id}] LLM处理失败 (重试 {retry_count + 1}/3): {e}",
+                        f"[{session_id}] LLM处理失败 (重试 {retry_count + 1}/"
+                        f"{self.pending_summary_max_attempts}): {e}",
                         exc_info=True,
                     )
                     await self._record_pending_summary(
@@ -584,7 +594,7 @@ class MemoryReflection:
 
         logger.warning(
             f"[{session_id}] 记录待重试总结: 范围=[{start_index}:{end_index}], "
-            f"重试次数={new_retry_count}/3"
+            f"重试次数={new_retry_count}/{self.pending_summary_max_attempts}"
         )
 
     def _on_storage_task_done(self, task: asyncio.Task, session_id: str):
