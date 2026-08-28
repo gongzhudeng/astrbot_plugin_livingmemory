@@ -3,13 +3,16 @@
 """
 
 import asyncio
+import json
 import os
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 
 from astrbot.api import logger
 
-from ...storage.sqlite_utils import sqlite_connection, with_sqlite_lock
+from ...storage.sqlite_utils import sqlite_connection
 
 
 @dataclass
@@ -43,6 +46,8 @@ class IndexValidator:
         """
         self.db_path = db_path
         self.faiss_db = faiss_db
+        # 防止后台维护与手动 /lmem rebuild-index 并发重建
+        self._rebuild_lock = asyncio.Lock()
 
     DEFAULT_REBUILD_BATCH_SIZE = 50
     DEFAULT_EMBEDDING_BATCH_SIZE = 8
@@ -53,34 +58,6 @@ class IndexValidator:
     DEFAULT_REQUEST_DELAY = 5.0
     RATE_LIMIT_RETRY_MIN_DELAY = 30.0
     DEFAULT_MAX_FAILURE_RATIO = 0.02
-
-    async def _clear_bm25_with_retry(
-        self, table_name: str = "livingmemory_memories_fts", max_attempts: int = 5
-    ) -> None:
-        """清空 BM25 索引表，不触碰 documents 原始数据。"""
-        for attempt in range(max_attempts):
-            try:
-                async with sqlite_connection(self.db_path) as db:
-                    await db.execute("PRAGMA busy_timeout = 10000")
-                    try:
-                        await db.execute(f"DELETE FROM {table_name}")
-                    except Exception as e:
-                        logger.warning(f"清空BM25索引失败: {e}")
-                    await db.commit()
-                return
-            except Exception as e:
-                if (
-                    "database is locked" in str(e).lower()
-                    and attempt < max_attempts - 1
-                ):
-                    wait_seconds = 0.2 * (attempt + 1)
-                    logger.warning(
-                        f"清空SQLite存储遇到锁，{wait_seconds:.1f}s后重试 "
-                        f"({attempt + 1}/{max_attempts}): {e}"
-                    )
-                    await asyncio.sleep(wait_seconds)
-                    continue
-                raise
 
     async def check_consistency(self) -> IndexStatus:
         """
@@ -348,6 +325,7 @@ class IndexValidator:
         self,
         batch_size: int,
         document_ids: set[int] | None = None,
+        after_id: int = 0,
     ):
         if document_ids is not None:
             sorted_ids = sorted(int(doc_id) for doc_id in document_ids)
@@ -368,7 +346,7 @@ class IndexValidator:
                     yield await cursor.fetchall()
             return
 
-        last_id = 0
+        last_id = after_id
         while True:
             async with sqlite_connection(self.db_path) as db:
                 await db.execute("PRAGMA busy_timeout = 10000")
@@ -419,7 +397,13 @@ class IndexValidator:
         total: int,
         options: dict[str, Any],
         progress_callback=None,
+        document_ids: set[int] | None = None,
     ) -> dict[str, Any]:
+        """重建 BM25 索引。
+
+        全量模式（document_ids=None）写入影子表，完成后与线上表在同一事务内
+        DROP+RENAME 原子切换，重建期间线上检索不中断；修复模式直接写入线上表。
+        """
         bm25_retriever = getattr(memory_engine, "bm25_retriever", None)
         text_processor = getattr(bm25_retriever, "text_processor", None)
         if text_processor is None:
@@ -431,11 +415,30 @@ class IndexValidator:
         batch_size = int(options["batch_size"])
         max_failure_ratio = float(options["max_failure_ratio"])
 
-        await self._clear_bm25_with_retry(table_name)
+        full_rebuild = document_ids is None
+        shadow_table = f"{table_name}_rebuild_shadow"
+        if full_rebuild:
+            # 准备影子表：遗留的半成品直接重建
+            async with sqlite_connection(self.db_path) as db:
+                await db.execute("PRAGMA busy_timeout = 10000")
+                await db.execute(f"DROP TABLE IF EXISTS {shadow_table}")
+                await db.execute(
+                    f"""
+                    CREATE VIRTUAL TABLE {shadow_table}
+                    USING fts5(
+                        content,
+                        doc_id UNINDEXED,
+                        tokenize='unicode61'
+                    )
+                    """
+                )
+                await db.commit()
+        target_table = shadow_table if full_rebuild else table_name
+
         processed = 0
         failed_ids: set[int] = set()
 
-        async for batch in self._iter_document_batches(batch_size):
+        async for batch in self._iter_document_batches(batch_size, document_ids):
             rows_to_insert: list[tuple[int, str]] = []
             for doc_id, _doc_uuid, text, _metadata_json in batch:
                 try:
@@ -456,7 +459,7 @@ class IndexValidator:
                     async with sqlite_connection(self.db_path) as db:
                         await db.execute("PRAGMA busy_timeout = 10000")
                         await db.executemany(
-                            f"INSERT INTO {table_name}(doc_id, content) VALUES (?, ?)",
+                            f"INSERT INTO {target_table}(doc_id, content) VALUES (?, ?)",
                             rows_to_insert,
                         )
                         await db.commit()
@@ -468,7 +471,7 @@ class IndexValidator:
                             async with sqlite_connection(self.db_path) as db:
                                 await db.execute("PRAGMA busy_timeout = 10000")
                                 await db.execute(
-                                    f"INSERT INTO {table_name}(doc_id, content) VALUES (?, ?)",
+                                    f"INSERT INTO {target_table}(doc_id, content) VALUES (?, ?)",
                                     (row_doc_id, processed_content),
                                 )
                                 await db.commit()
@@ -489,6 +492,31 @@ class IndexValidator:
                     f"BM25 重建失败率过高: {len(failed_ids)}/{total}，停止后续重建"
                 )
                 break
+
+        if full_rebuild:
+            ratio = self._failure_ratio(len(failed_ids), total)
+            if ratio <= max_failure_ratio and processed > 0:
+                # 原子切换：DROP 旧表 + RENAME 影子表在同一事务内完成
+                async with sqlite_connection(self.db_path) as db:
+                    await db.execute("PRAGMA busy_timeout = 10000")
+                    await db.execute("BEGIN IMMEDIATE")
+                    try:
+                        await db.execute(f"DROP TABLE IF EXISTS {table_name}")
+                        await db.execute(
+                            f"ALTER TABLE {shadow_table} RENAME TO {table_name}"
+                        )
+                        await db.commit()
+                    except Exception:
+                        await db.rollback()
+                        raise
+                logger.info(f"BM25 影子表已原子切换: {table_name}")
+            else:
+                # 失败：丢弃影子表，线上表保持不变
+                async with sqlite_connection(self.db_path) as db:
+                    await db.execute("PRAGMA busy_timeout = 10000")
+                    await db.execute(f"DROP TABLE IF EXISTS {shadow_table}")
+                    await db.commit()
+                logger.warning("BM25 影子表重建失败，已保留线上索引")
 
         return {
             "processed": processed,
@@ -673,14 +701,72 @@ class IndexValidator:
         if dimension <= 0:
             raise RuntimeError("无法重建向量索引：索引维度无效")
 
+        index_path = getattr(embedding_storage, "path", None)
+        # 影子索引与断点进度文件：重建期间持久化，进程中断后可续跑
+        shadow_path = f"{index_path}.rebuild.shadow" if index_path else None
+        progress_path = f"{index_path}.rebuild.progress.json" if index_path else None
+
         temp_index = faiss.IndexIDMap(faiss.IndexFlatL2(dimension))
         processed = 0
         failed_ids: set[int] = set()
+        after_id = 0
+
+        # 断点续跑：加载上次中断留下的影子索引与进度
+        if shadow_path and progress_path and os.path.exists(shadow_path):
+            try:
+                saved_index = faiss.read_index(shadow_path)
+                saved_progress: dict[str, Any] = {}
+                if os.path.exists(progress_path):
+                    saved_progress = json.loads(
+                        Path(progress_path).read_text(encoding="utf-8")
+                    )
+                if int(getattr(saved_index, "d", 0)) == dimension:
+                    temp_index = saved_index
+                    after_id = int(saved_progress.get("last_id", 0))
+                    processed = int(saved_progress.get("processed", 0))
+                    failed_ids = {
+                        int(doc_id) for doc_id in saved_progress.get("failed_ids", [])
+                    }
+                    logger.info(
+                        f"向量重建断点续跑: 已处理 {processed}/{total}, "
+                        f"从 id>{after_id} 继续"
+                    )
+                else:
+                    logger.warning("影子索引维度与当前模型不一致，忽略并从头重建")
+            except Exception as e:
+                logger.warning(f"加载影子索引失败，从头重建: {e}")
+                temp_index = faiss.IndexIDMap(faiss.IndexFlatL2(dimension))
+                processed = 0
+                failed_ids = set()
+                after_id = 0
+
+        def _persist_shadow_progress(last_id: int) -> None:
+            if not shadow_path or not progress_path:
+                return
+            try:
+                faiss.write_index(temp_index, shadow_path)
+                Path(progress_path).write_text(
+                    json.dumps(
+                        {
+                            "last_id": last_id,
+                            "processed": processed,
+                            "failed_ids": sorted(failed_ids),
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            except Exception as e:
+                # 进度持久化失败只影响续跑能力，不中断重建
+                logger.debug(f"保存向量重建进度失败: {e}")
+
+        failed_ratio_exceeded = False
         batch_delay = float(options["batch_delay"])
         max_failure_ratio = float(options["max_failure_ratio"])
         batch_index = 0
 
-        async for batch in self._iter_document_batches(int(options["batch_size"])):
+        async for batch in self._iter_document_batches(
+            int(options["batch_size"]), after_id=after_id
+        ):
             batch_index += 1
             ids = [int(row[0]) for row in batch]
             contents = [row[2] or "" for row in batch]
@@ -690,6 +776,7 @@ class IndexValidator:
                 f"id_range={ids[0]}-{ids[-1]}, processed={processed}/{total}, "
                 f"failed={len(failed_ids)}"
             )
+            batch_succeeded = False
             try:
                 vectors = await self._embed_batch_with_retry(
                     provider, contents, options
@@ -705,6 +792,7 @@ class IndexValidator:
                     )
                 temp_index.add_with_ids(vectors_array, np.asarray(ids, dtype=np.int64))
                 processed += len(ids)
+                batch_succeeded = True
             except Exception as e:
                 failed_ids.update(ids)
                 logger.error(f"向量重建批次失败 ids={ids[:3]}...: {e}", exc_info=True)
@@ -722,20 +810,29 @@ class IndexValidator:
                 f"failure_ratio={self._failure_ratio(len(failed_ids), total):.2%}"
             )
 
+            if batch_succeeded:
+                # 进度与影子索引内容严格对齐，续跑不会重复添加向量
+                _persist_shadow_progress(ids[-1])
+
             if self._failure_ratio(len(failed_ids), total) > max_failure_ratio:
                 logger.error(
                     f"向量重建失败率过高: {len(failed_ids)}/{total}，不会切换新索引"
                 )
-                return {
-                    "mode": "full",
-                    "processed": processed,
-                    "errors": len(failed_ids),
-                    "failed_ids": failed_ids,
-                    "switched": False,
-                    "partial": True,
-                }
+                failed_ratio_exceeded = True
+                break
             if batch_delay > 0:
                 await asyncio.sleep(batch_delay)
+
+        if failed_ratio_exceeded:
+            # 保留影子索引与进度，下次重建可断点续跑；线上索引不受影响
+            return {
+                "mode": "full",
+                "processed": processed,
+                "errors": len(failed_ids),
+                "failed_ids": failed_ids,
+                "switched": False,
+                "partial": True,
+            }
 
         if total > 0 and processed == 0:
             return {
@@ -747,18 +844,26 @@ class IndexValidator:
                 "partial": True,
             }
 
-        index_path = getattr(embedding_storage, "path", None)
         if index_path:
-            temp_path = f"{index_path}.rebuild.tmp"
-            try:
-                faiss.write_index(temp_index, temp_path)
-                os.replace(temp_path, index_path)
-            finally:
-                if os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                    except OSError:
-                        pass
+            if shadow_path and os.path.exists(shadow_path):
+                # 影子索引在重建期间已随批次持久化，完成后原子替换线上索引
+                os.replace(shadow_path, index_path)
+            else:
+                temp_path = f"{index_path}.rebuild.tmp"
+                try:
+                    faiss.write_index(temp_index, temp_path)
+                    os.replace(temp_path, index_path)
+                finally:
+                    if os.path.exists(temp_path):
+                        try:
+                            os.remove(temp_path)
+                        except OSError:
+                            pass
+            if progress_path and os.path.exists(progress_path):
+                try:
+                    os.remove(progress_path)
+                except OSError:
+                    pass
 
         embedding_storage.index = temp_index
         return {
@@ -776,6 +881,7 @@ class IndexValidator:
         total: int,
         options: dict[str, Any],
         progress_callback=None,
+        force_full: bool = False,
     ) -> dict[str, Any]:
         document_ids = await self._get_document_ids()
         if not document_ids:
@@ -788,11 +894,28 @@ class IndexValidator:
                 "partial": False,
             }
 
-        vector_ids = self._get_vector_ids()
-        vector_count = self._get_vector_count()
-        if vector_ids is not None:
-            missing_ids = document_ids - vector_ids
-            if not missing_ids:
+        if not force_full:
+            vector_ids = self._get_vector_ids()
+            vector_count = self._get_vector_count()
+            if vector_ids is not None:
+                missing_ids = document_ids - vector_ids
+                if not missing_ids:
+                    return {
+                        "mode": "skip",
+                        "processed": 0,
+                        "errors": 0,
+                        "failed_ids": set(),
+                        "switched": False,
+                        "partial": False,
+                    }
+                if vector_ids:
+                    logger.info(f"检测到 {len(missing_ids)} 条向量缺失，执行增量补写")
+                    return await self._repair_missing_vectors(
+                        memory_engine, missing_ids, options, progress_callback
+                    )
+
+            if vector_ids is None and vector_count >= total:
+                logger.info("向量索引计数不小于 documents 数量，跳过全量向量重建")
                 return {
                     "mode": "skip",
                     "processed": 0,
@@ -801,22 +924,6 @@ class IndexValidator:
                     "switched": False,
                     "partial": False,
                 }
-            if vector_ids:
-                logger.info(f"检测到 {len(missing_ids)} 条向量缺失，执行增量补写")
-                return await self._repair_missing_vectors(
-                    memory_engine, missing_ids, options, progress_callback
-                )
-
-        if vector_ids is None and vector_count >= total:
-            logger.info("向量索引计数不小于 documents 数量，跳过全量向量重建")
-            return {
-                "mode": "skip",
-                "processed": 0,
-                "errors": 0,
-                "failed_ids": set(),
-                "switched": False,
-                "partial": False,
-            }
 
         logger.info("向量索引缺失或为空，执行安全全量重建")
         return await self._rebuild_vector_index_full(
@@ -863,26 +970,53 @@ class IndexValidator:
         except Exception as e:
             logger.warning(f"更新迁移状态失败: {e}")
 
-    @with_sqlite_lock(lambda self, *args, **kwargs: self.db_path)
     async def rebuild_indexes(
-        self, memory_engine: Any, progress_callback=None
+        self,
+        memory_engine: Any,
+        progress_callback=None,
+        force_vector_rebuild: bool = False,
     ) -> dict[str, Any]:
         """
         分批安全重建索引
 
         安全策略：
         1. documents 表只读，始终作为原始数据源。
-        2. BM25 直接按 documents 分批重建。
-        3. 向量索引优先增量补缺；需要全量重建时先构建临时 FAISS 索引。
-        4. 失败率超过阈值时不切换全量重建的新向量索引。
+        2. BM25 写入影子表，完成后原子切换，重建期间检索不中断。
+        3. 向量索引优先增量补缺；全量重建写入影子索引（支持断点续跑），
+           完成后原子替换；失败率超过阈值时不切换。
+        4. 重建完成后对并发写入的新文档做一次有上限的补偿修复。
 
         Args:
             memory_engine: MemoryEngine实例
             progress_callback: 进度回调函数 (current, total, message)
+            force_vector_rebuild: 跳过向量增量判断，强制全量重建
+                （嵌入模型更换时由调用方传入）
 
         Returns:
             Dict: 重建结果
         """
+        if self._rebuild_lock.locked():
+            return {
+                "success": False,
+                "message": "索引重建已在进行中，请等待当前重建完成。",
+                "processed": 0,
+                "errors": 0,
+                "total": 0,
+                "partial": False,
+                "switched": False,
+                "already_running": True,
+            }
+        async with self._rebuild_lock:
+            return await self._rebuild_indexes_locked(
+                memory_engine, progress_callback, force_vector_rebuild
+            )
+
+    async def _rebuild_indexes_locked(
+        self,
+        memory_engine: Any,
+        progress_callback=None,
+        force_vector_rebuild: bool = False,
+    ) -> dict[str, Any]:
         try:
             logger.info("开始分批安全重建索引。")
             options = self._get_rebuild_options(memory_engine)
@@ -937,7 +1071,11 @@ class IndexValidator:
                 }
 
             vector_result = await self._rebuild_or_repair_vector_index(
-                memory_engine, total, options, progress_callback
+                memory_engine,
+                total,
+                options,
+                progress_callback,
+                force_full=force_vector_rebuild,
             )
             vector_failed_ids = set(vector_result["failed_ids"])
             failed_ids = bm25_failed_ids | vector_failed_ids
@@ -963,12 +1101,20 @@ class IndexValidator:
                     "全量向量重建未切换新索引，documents 原始数据未被删除。"
                 )
 
+            compensated = 0
+            if accepted:
+                # 并发写入收尾补偿：重建期间新增/变更的文档补齐派生索引
+                compensated = await self._repair_rebuild_delta(
+                    memory_engine, options, progress_callback
+                )
+
             logger.info(
                 "索引重建结果: "
                 f"accepted={accepted}, partial={partial}, "
                 f"bm25={bm25_result['processed']}/{total}, "
                 f"vector={vector_result['processed']}/{total}, "
-                f"errors={len(failed_ids)}, vector_mode={vector_result['mode']}"
+                f"errors={len(failed_ids)}, vector_mode={vector_result['mode']}, "
+                f"compensated={compensated}"
             )
 
             return {
@@ -985,6 +1131,7 @@ class IndexValidator:
                 "vector_errors": vector_result["errors"],
                 "vector_mode": vector_result["mode"],
                 "failure_ratio": failure_ratio,
+                "compensated": compensated,
             }
 
         except Exception as e:
@@ -997,3 +1144,124 @@ class IndexValidator:
                 ),
                 "error": str(e),
             }
+
+    _MAX_REBUILD_DELTA_REPAIR = 200
+
+    async def _get_missing_bm25_ids(self, limit: int | None = None) -> list[int]:
+        """返回 documents 中存在但 BM25 索引缺失的文档 ID。"""
+        async with sqlite_connection(self.db_path) as db:
+            query = """
+                SELECT d.id FROM documents d
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM livingmemory_memories_fts f
+                    WHERE f.doc_id = d.id
+                )
+                ORDER BY d.id
+            """
+            params: list[Any] = []
+            if limit is not None:
+                query += " LIMIT ?"
+                params.append(int(limit))
+            cursor = await db.execute(query, params)
+            return [int(row[0]) for row in await cursor.fetchall()]
+
+    async def _repair_rebuild_delta(
+        self,
+        memory_engine: Any,
+        options: dict[str, Any],
+        progress_callback=None,
+    ) -> int:
+        """对重建期间并发写入的文档做一次有上限的补偿修复。
+
+        Args:
+            memory_engine: MemoryEngine实例
+            options: 重建参数
+            progress_callback: 进度回调函数
+
+        Returns:
+            int: 补偿修复的文档数量
+        """
+        repaired = 0
+        try:
+            missing_bm25 = await self._get_missing_bm25_ids(
+                limit=self._MAX_REBUILD_DELTA_REPAIR
+            )
+            if missing_bm25:
+                logger.info(f"重建后补偿: 补写 {len(missing_bm25)} 条 BM25 缺失")
+                result = await self._rebuild_bm25_index(
+                    memory_engine,
+                    len(missing_bm25),
+                    options,
+                    progress_callback,
+                    document_ids=set(missing_bm25),
+                )
+                repaired += int(result["processed"])
+
+            document_ids = await self._get_document_ids()
+            vector_ids = self._get_vector_ids()
+            if vector_ids is not None:
+                missing_vectors = document_ids - vector_ids
+                if missing_vectors:
+                    capped = set(
+                        sorted(missing_vectors)[: self._MAX_REBUILD_DELTA_REPAIR]
+                    )
+                    logger.info(f"重建后补偿: 补写 {len(capped)} 条向量缺失")
+                    result = await self._repair_missing_vectors(
+                        memory_engine, capped, options, progress_callback
+                    )
+                    repaired += int(result["processed"])
+        except Exception as e:
+            logger.warning(f"重建后补偿修复失败（可在下次重建时补齐）: {e}")
+        return repaired
+
+    def _embedding_fingerprint_path(self) -> str:
+        return f"{self.db_path}.embedding_fingerprint.json"
+
+    @staticmethod
+    def _compute_embedding_fingerprint(provider: Any) -> str:
+        """Compute a stable identity string for the embedding provider."""
+        config = getattr(provider, "provider_config", None) or {}
+        provider_id = (
+            str(config.get("id", "") or "") if isinstance(config, dict) else ""
+        )
+        get_model = getattr(provider, "get_model", None)
+        model = str(get_model()) if callable(get_model) else ""
+        get_dim = getattr(provider, "get_dim", None)
+        try:
+            dimension = int(get_dim()) if callable(get_dim) else 0
+        except (TypeError, ValueError):
+            dimension = 0
+        return f"{provider_id}:{model}:{dimension}"
+
+    async def check_embedding_fingerprint(self, provider: Any) -> tuple[bool, str]:
+        """Compare the provider identity against the stored fingerprint.
+
+        Returns:
+            tuple[bool, str]: (指纹是否变化, 当前指纹)
+        """
+        current = self._compute_embedding_fingerprint(provider)
+        stored: str | None = None
+        path = self._embedding_fingerprint_path()
+        if os.path.exists(path):
+            try:
+                data = json.loads(Path(path).read_text(encoding="utf-8"))
+                stored = data.get("fingerprint")
+            except Exception as e:
+                logger.debug(f"读取嵌入模型指纹失败: {e}")
+        return (stored is not None and stored != current), current
+
+    async def save_embedding_fingerprint(self, provider: Any) -> None:
+        """Persist the current embedding provider identity."""
+        try:
+            path = self._embedding_fingerprint_path()
+            Path(path).write_text(
+                json.dumps(
+                    {
+                        "fingerprint": self._compute_embedding_fingerprint(provider),
+                        "updated_at": time.time(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.debug(f"保存嵌入模型指纹失败: {e}")

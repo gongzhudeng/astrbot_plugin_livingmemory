@@ -326,3 +326,108 @@ async def test_rebuild_indexes_repairs_only_missing_vectors_when_index_is_readab
     assert provider.calls == [["doc-4"]]
     assert memory_engine.faiss_db.embedding_storage.index.ntotal == 5
     assert _count_rows(db_path, "documents") == 5
+
+
+@pytest.mark.asyncio
+async def test_rebuild_bm25_uses_shadow_table_and_atomic_swap(tmp_path: Path):
+    """BM25 全量重建应写入影子表并原子切换，线上表在重建期间保持可用。"""
+    db_path = tmp_path / "memory_shadow.db"
+    index_path = tmp_path / "memory_shadow.index"
+    _prepare_db(db_path, count=3)
+
+    provider = _DummyEmbeddingProvider()
+    memory_engine = _DummyMemoryEngine(db_path, index_path, provider, batch_size=2)
+    validator = IndexValidator(str(db_path), faiss_db=memory_engine.faiss_db)
+
+    # 重建前线上表是旧内容
+    with sqlite3.connect(db_path) as conn:
+        old_rows = conn.execute(
+            "SELECT content FROM livingmemory_memories_fts ORDER BY doc_id"
+        ).fetchall()
+    assert all(content.startswith("old-doc-") for (content,) in old_rows)
+
+    result = await validator.rebuild_indexes(memory_engine=memory_engine)
+    assert result["success"] is True
+
+    with sqlite3.connect(db_path) as conn:
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        new_rows = conn.execute(
+            "SELECT content FROM livingmemory_memories_fts ORDER BY doc_id"
+        ).fetchall()
+    # 影子表已切换为线上表且被清理
+    assert "livingmemory_memories_fts_rebuild_shadow" not in tables
+    # 内容已是重建后的新内容
+    assert [content for (content,) in new_rows] == ["doc-0", "doc-1", "doc-2"]
+
+
+@pytest.mark.asyncio
+async def test_vector_rebuild_resumes_from_shadow_index(tmp_path: Path):
+    """向量重建中断后应保留影子索引与进度，再次重建可续跑并完成切换。"""
+    db_path = tmp_path / "memory_resume.db"
+    index_path = tmp_path / "memory_resume.index"
+    _prepare_db(db_path, count=5)
+
+    # 第一轮：docs 2、3 嵌入失败，失败率超阈值，不切换
+    failing_provider = _DummyEmbeddingProvider(fail_contents={"doc-2", "doc-3"})
+    memory_engine = _DummyMemoryEngine(
+        db_path, index_path, failing_provider, batch_size=2
+    )
+    validator = IndexValidator(str(db_path), faiss_db=memory_engine.faiss_db)
+    first = await validator.rebuild_indexes(memory_engine=memory_engine)
+    assert first["success"] is False
+    assert first["switched"] is False
+
+    shadow_path = Path(str(index_path) + ".rebuild.shadow")
+    progress_path = Path(str(index_path) + ".rebuild.progress.json")
+    assert shadow_path.exists()
+    assert progress_path.exists()
+
+    # 第二轮：健康的 Provider，续跑后完成并清理进度文件
+    healthy_provider = _DummyEmbeddingProvider()
+    memory_engine2 = _DummyMemoryEngine(
+        db_path, index_path, healthy_provider, batch_size=2
+    )
+    validator2 = IndexValidator(str(db_path), faiss_db=memory_engine2.faiss_db)
+    second = await validator2.rebuild_indexes(memory_engine=memory_engine2)
+    assert second["success"] is True
+    assert second["switched"] is True
+    assert not progress_path.exists()
+
+    storage = memory_engine2.faiss_db.embedding_storage
+    assert int(storage.index.ntotal) == 5
+
+
+@pytest.mark.asyncio
+async def test_embedding_fingerprint_detects_model_change(tmp_path: Path):
+    """嵌入模型指纹：首次保存后不触发，更换模型后检测到变化。"""
+    db_path = tmp_path / "memory_fp.db"
+    validator = IndexValidator(str(db_path), faiss_db=None)
+
+    class _Provider:
+        provider_config = {"id": "prov-a"}
+
+        def get_model(self) -> str:
+            return "text-embedding-a"
+
+        def get_dim(self) -> int:
+            return 1024
+
+    provider_a = _Provider()
+    changed, current = await validator.check_embedding_fingerprint(provider_a)
+    assert changed is False  # 首次（无存储指纹）不视为变化
+    await validator.save_embedding_fingerprint(provider_a)
+
+    changed, _ = await validator.check_embedding_fingerprint(provider_a)
+    assert changed is False
+
+    class _ProviderB(_Provider):
+        def get_model(self) -> str:
+            return "text-embedding-b"
+
+    changed, _ = await validator.check_embedding_fingerprint(_ProviderB())
+    assert changed is True

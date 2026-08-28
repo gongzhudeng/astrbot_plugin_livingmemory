@@ -837,6 +837,25 @@ class PluginInitializer:
 
             self._set_maintenance_status("checking")
 
+            # 嵌入模型指纹：模型变化（即使维度相同）时强制全量向量重建
+            force_vector_rebuild = False
+            embedding_provider = self.embedding_provider or (
+                getattr(self.db, "embedding_provider", None) if self.db else None
+            )
+            if embedding_provider is not None:
+                try:
+                    (
+                        fingerprint_changed,
+                        _current_fp,
+                    ) = await self.index_validator.check_embedding_fingerprint(
+                        embedding_provider
+                    )
+                    if fingerprint_changed:
+                        logger.warning("检测到 Embedding 模型变化，将强制全量向量重建")
+                        force_vector_rebuild = True
+                except Exception:
+                    logger.debug("检查嵌入模型指纹失败", exc_info=True)
+
             # 检查v1迁移状态
             (
                 needs_migration_rebuild,
@@ -865,37 +884,50 @@ class PluginInitializer:
                     self._set_maintenance_status(
                         "failed", str(result.get("message", ""))
                     )
-                return
-
-            # 检查索引一致性
-            status = await self.index_validator.check_consistency()
-
-            if not status.is_consistent and status.needs_rebuild:
-                logger.warning(f"检测到索引不一致: {status.reason}")
-                logger.info(
-                    f"当前索引计数 - Documents: {status.documents_count}, BM25: {status.bm25_count}, Vector: {status.vector_count}"
-                )
-                logger.info("开始在后台自动重建索引。")
-                self._set_maintenance_status("rebuilding", str(status.reason))
-
-                result = await self.index_validator.rebuild_indexes(self.memory_engine)
-
-                if result["success"]:
-                    logger.info(
-                        f"索引自动重建完成: 成功 {result['processed']} 条, 失败 {result['errors']} 条"
-                    )
-                    self._set_maintenance_status(
-                        "ok",
-                        f"重建完成: 成功 {result['processed']} 条, 失败 {result['errors']} 条",
-                    )
-                else:
-                    logger.error(f"索引自动重建失败: {result.get('message')}")
-                    self._set_maintenance_status(
-                        "failed", str(result.get("message", ""))
-                    )
             else:
-                logger.info(f"索引一致性检查通过: {status.reason}")
-                self._set_maintenance_status("ok", str(status.reason))
+                # 检查索引一致性
+                status = await self.index_validator.check_consistency()
+
+                if force_vector_rebuild or (
+                    not status.is_consistent and status.needs_rebuild
+                ):
+                    if force_vector_rebuild:
+                        reason = "Embedding 模型变化"
+                    else:
+                        reason = str(status.reason)
+                    logger.warning(f"检测到索引不一致: {reason}")
+                    logger.info(
+                        f"当前索引计数 - Documents: {status.documents_count}, BM25: {status.bm25_count}, Vector: {status.vector_count}"
+                    )
+                    logger.info("开始在后台自动重建索引。")
+                    self._set_maintenance_status("rebuilding", reason)
+
+                    result = await self.index_validator.rebuild_indexes(
+                        self.memory_engine,
+                        force_vector_rebuild=force_vector_rebuild,
+                    )
+
+                    if result["success"]:
+                        logger.info(
+                            f"索引自动重建完成: 成功 {result['processed']} 条, 失败 {result['errors']} 条"
+                        )
+                        self._set_maintenance_status(
+                            "ok",
+                            f"重建完成: 成功 {result['processed']} 条, 失败 {result['errors']} 条",
+                        )
+                    else:
+                        logger.error(f"索引自动重建失败: {result.get('message')}")
+                        self._set_maintenance_status(
+                            "failed", str(result.get("message", ""))
+                        )
+                else:
+                    logger.info(f"索引一致性检查通过: {status.reason}")
+                    self._set_maintenance_status("ok", str(status.reason))
+
+            if embedding_provider is not None:
+                await self.index_validator.save_embedding_fingerprint(
+                    embedding_provider
+                )
 
         except asyncio.CancelledError:
             self._set_maintenance_status("cancelled", "插件关闭时取消")
