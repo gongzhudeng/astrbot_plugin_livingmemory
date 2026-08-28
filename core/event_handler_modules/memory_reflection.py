@@ -479,6 +479,16 @@ class MemoryReflection:
                             memory_id=memory_id,
                         )
 
+                    # 记忆整合（reflection 触发，带冷却；失败不影响反思流程）
+                    consolidation_manager = getattr(self, "consolidation_manager", None)
+                    if consolidation_manager is not None:
+                        try:
+                            await consolidation_manager.maybe_run("reflection")
+                        except Exception as consolidation_err:
+                            logger.warning(
+                                f"[{session_id}] 记忆整合检查失败: {consolidation_err}"
+                            )
+
                 # 成功：更新已总结的位置，清除待处理记录
                 if self.conversation_manager:
                     try:

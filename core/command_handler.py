@@ -30,6 +30,7 @@ class CommandHandler:
         memory_processor=None,
         initialization_status_callback=None,
         maintenance_status_callback=None,
+        consolidation_manager=None,
     ):
         """
         初始化命令处理器
@@ -43,6 +44,7 @@ class CommandHandler:
             memory_processor: 记忆处理器（用于手动总结）
             initialization_status_callback: 初始化状态回调函数
             maintenance_status_callback: 后台索引维护状态回调函数
+            consolidation_manager: 记忆整合管理器（用于手动整合）
         """
         self.context = context
         self.config_manager = config_manager
@@ -52,6 +54,7 @@ class CommandHandler:
         self._memory_processor = memory_processor
         self.get_initialization_status = initialization_status_callback
         self.get_maintenance_status = maintenance_status_callback
+        self.consolidation_manager = consolidation_manager
 
     @staticmethod
     def _format_error_message(
@@ -477,6 +480,46 @@ class CommandHandler:
                     t("summarize.action_name"),
                     e,
                     t_list("error.suggestions.summarize"),
+                )
+            )
+
+    async def handle_consolidate(
+        self, event: AstrMessageEvent
+    ) -> AsyncGenerator[MessageEventResult, None]:
+        """处理 /lmem consolidate 命令 - 手动触发一次记忆库整合"""
+        if not self.consolidation_manager:
+            yield event.plain_result(
+                self._component_not_ready_message("记忆整合管理器", "/lmem consolidate")
+            )
+            return
+
+        yield event.plain_result(t("consolidate.starting"))
+        try:
+            stats = await self.consolidation_manager.run_consolidation(
+                force=True, include_disabled=True
+            )
+            if stats.get("skipped"):
+                yield event.plain_result(
+                    t("consolidate.skipped", reason=stats.get("reason", ""))
+                )
+                return
+            yield event.plain_result(
+                t(
+                    "consolidate.done",
+                    groups=stats.get("groups", 0),
+                    merged=stats.get("merged", 0),
+                    archived=stats.get("archived", 0),
+                    deleted=stats.get("deleted", 0),
+                    failed=stats.get("failed", 0),
+                )
+            )
+        except Exception as e:
+            logger.error(f"手动触发记忆整合失败: {e}", exc_info=True)
+            yield event.plain_result(
+                self._format_error_message(
+                    t("consolidate.action_name"),
+                    e,
+                    t_list("error.suggestions.consolidate"),
                 )
             )
 

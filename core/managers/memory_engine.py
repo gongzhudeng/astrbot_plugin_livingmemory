@@ -1936,6 +1936,69 @@ class MemoryEngine:
         return total_deleted
 
     @with_sqlite_lock(lambda self, *args, **kwargs: self.db_path)
+    async def archive_memories(self, memory_ids: list[int]) -> int:
+        """Archive memories: remove from retrieval indexes, retain documents.
+
+        归档不是删除：documents 表保留原文，仅从 BM25/向量/图/原子索引移除，
+        并将 metadata.status 标记为 archived（可随时人工恢复）。
+
+        Args:
+            memory_ids: 要归档的记忆 ID 列表。
+
+        Returns:
+            int: 实际归档的记忆数量。
+        """
+        if not memory_ids or self.db_connection is None:
+            return 0
+
+        unique_ids = list(dict.fromkeys(int(memory_id) for memory_id in memory_ids))
+        documents = await self.faiss_db.document_storage.get_documents(
+            metadata_filters={},
+            ids=unique_ids,
+            offset=0,
+            limit=len(unique_ids),
+        )
+        active_documents = []
+        metadata_updates: list[tuple[str, int]] = []
+        archived_at = time.time()
+        for document in documents:
+            metadata = self._safe_json_dict(document.get("metadata"))
+            if str(metadata.get("status") or "active") == "archived":
+                continue
+            metadata["status"] = "archived"
+            metadata["archived_at"] = archived_at
+            active_documents.append(document)
+            metadata_updates.append(
+                (json.dumps(metadata, ensure_ascii=False), int(document["id"]))
+            )
+        if not active_documents:
+            return 0
+
+        archived_ids = [int(document["id"]) for document in active_documents]
+        placeholders = ",".join("?" * len(archived_ids))
+        await self.db_connection.executemany(
+            "UPDATE documents SET metadata = ? WHERE id = ?",
+            metadata_updates,
+        )
+        await self.db_connection.execute(
+            f"DELETE FROM livingmemory_memories_fts WHERE doc_id IN ({placeholders})",
+            archived_ids,
+        )
+        await self.db_connection.commit()
+
+        embedding_storage = getattr(self.faiss_db, "embedding_storage", None)
+        embedding_delete = getattr(embedding_storage, "delete", None)
+        if callable(embedding_delete):
+            await embedding_delete(archived_ids)
+        else:
+            logger.warning("[归档] 当前 AstrBot 不支持独立删除向量，已保留软归档状态")
+
+        await self._delete_graph_and_atoms_for_batch(archived_ids)
+        self._invalidate_search_cache()
+        logger.info(f"[归档] 已归档 {len(archived_ids)} 条记忆")
+        return len(archived_ids)
+
+    @with_sqlite_lock(lambda self, *args, **kwargs: self.db_path)
     async def cleanup_old_memories(
         self,
         days_threshold: int | None = None,

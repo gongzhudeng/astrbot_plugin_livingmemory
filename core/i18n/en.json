@@ -15,6 +15,7 @@
     },
     "component_not_ready": "{command} failed: {component} is not initialized.\nPlease run /lmem status to check plugin status; if abnormal, check startup logs.",
     "suggestions": {
+      "consolidate": ["Check consolidation config and retry"],
       "status": ["Confirm database file is readable/writable", "Confirm memory engine initialization is complete", "Check logs for exception stack trace to locate specific module"],
       "search": ["Confirm keyword is not empty and of reasonable length", "Confirm database and index files exist and are readable/writable", "Check logs for retrieval component initialization failure"],
       "forget": ["Confirm memory ID exists and belongs to currently accessible data", "Confirm database is not occupied by another process for a long time", "Check logs for delete call stack"],
@@ -24,6 +25,12 @@
       "reset": ["Confirm session ID is valid and session storage is accessible", "Confirm database is not occupied", "Check logs for clear_session call stack"],
       "cleanup": ["Confirm current session has readable historical records", "Confirm conversation storage is readable/writable", "Check logs for cleanup call stack"]
     }
+  },
+"consolidate": {
+    "action_name": "Memory consolidation",
+    "starting": "Starting memory consolidation, this may call the LLM. Please wait...",
+    "skipped": "Consolidation skipped this time: {reason}",
+    "done": "Consolidation finished: {groups} group(s), {merged} memory merged; {archived} archived, {deleted} deleted, {failed} failed."
   },
   "status": {
     "action_name": "Status fetch",

@@ -21,6 +21,7 @@ from .core.event_handler import EventHandler
 from .core.i18n_backend import init as i18n_init
 from .core.i18n_backend import t
 from .core.managers.backup_manager import BackupManager
+from .core.managers.consolidation_manager import MemoryConsolidationManager
 from .core.passive_group_capture import (
     PassiveGroupCaptureFilter,
     get_active_plugin,
@@ -123,6 +124,7 @@ class LivingMemoryPlugin(Star):
         # 事件处理器和命令处理器（初始化后创建）
         self.event_handler: EventHandler | None = None
         self.command_handler: CommandHandler | None = None
+        self.consolidation_manager: MemoryConsolidationManager | None = None
 
         # 后台任务跟踪集合
         self._background_tasks: set[asyncio.Task] = set()
@@ -214,6 +216,19 @@ class LivingMemoryPlugin(Star):
                     conversation_manager=self.initializer.conversation_manager,  # type: ignore[arg-type]
                 )
 
+            # 创建记忆整合管理器（幂等），挂接到事件处理器与衰减调度器
+            if not self.consolidation_manager:
+                self.consolidation_manager = MemoryConsolidationManager(
+                    memory_engine=self.initializer.memory_engine,
+                    memory_processor=self.initializer.memory_processor,
+                    config_manager=self.config_manager,
+                )
+            self.event_handler.consolidation_manager = self.consolidation_manager
+            if self.initializer.decay_scheduler:
+                self.initializer.decay_scheduler.consolidation_manager = (
+                    self.consolidation_manager
+                )
+
             # 创建命令处理器（幂等）
             if not self.command_handler:
                 self.command_handler = CommandHandler(
@@ -227,6 +242,7 @@ class LivingMemoryPlugin(Star):
                     maintenance_status_callback=lambda: (
                         self.initializer.maintenance_status
                     ),
+                    consolidation_manager=self.consolidation_manager,
                 )
 
             self._register_agent_tools_if_needed()
@@ -514,6 +530,24 @@ class LivingMemoryPlugin(Star):
             return
 
         async for message in self.command_handler.handle_summarize(event):
+            yield message
+
+    @permission_type(PermissionType.ADMIN)
+    @lmem.command("consolidate")
+    async def consolidate(
+        self, event: AstrMessageEvent
+    ) -> AsyncGenerator[MessageEventResult, None]:
+        """[Admin] Manually trigger one round of memory consolidation"""
+        ready, message = await self._ensure_plugin_ready()
+        if not ready:
+            yield event.plain_result(message)
+            return
+
+        if not self.command_handler:
+            yield event.plain_result(self._command_handler_not_ready_message())
+            return
+
+        async for message in self.command_handler.handle_consolidate(event):
             yield message
 
     @permission_type(PermissionType.ADMIN)

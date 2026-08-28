@@ -15,6 +15,7 @@
     },
     "component_not_ready": "{command} 执行失败：{component}未初始化。\n请先执行 /lmem status 检查插件状态；如状态异常请查看启动日志。",
     "suggestions": {
+      "consolidate": ["确认记忆整合配置正确后重试"],
       "status": ["确认数据库文件可读写","确认记忆引擎已完成初始化","查看日志中的异常堆栈定位具体模块"],
       "search": ["确认关键词不为空且长度合理","确认数据库和索引文件存在且可读写","检查日志中是否有检索组件初始化失败信息"],
       "forget": ["确认记忆 ID 存在且属于当前可访问数据","确认数据库未被其他进程长时间占用","查看日志中的删除调用堆栈"],
@@ -24,6 +25,12 @@
       "reset": ["确认会话 ID 有效且会话存储可访问","确认数据库未被占用","查看日志中的 clear_session 调用堆栈"],
       "cleanup": ["确认当前会话存在可读取的历史记录","确认对话存储可读写","查看日志中的 cleanup 调用堆栈"]
     }
+  },
+"consolidate": {
+    "action_name": "记忆整合",
+    "starting": "开始整合记忆库，可能需要调用 LLM，请稍候……",
+    "skipped": "本次未执行整合：{reason}",
+    "done": "记忆整合完成：整合 {groups} 组，合并 {merged} 条记忆；归档 {archived} 条，删除 {deleted} 条，失败 {failed} 组。"
   },
   "status": {
     "action_name": "获取状态",

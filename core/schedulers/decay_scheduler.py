@@ -197,6 +197,19 @@ class DecayScheduler:
                     exc_info=True,
                 )
 
+            # 每日触发一次记忆库整合（未启用或非 daily 触发时内部自动跳过）
+            consolidation_manager = getattr(self, "consolidation_manager", None)
+            if consolidation_manager is not None:
+                try:
+                    result = await consolidation_manager.maybe_run("daily")
+                    if not result.get("skipped"):
+                        logger.info(f"[衰减调度] 记忆整合完成: {result}")
+                except Exception as consolidation_err:
+                    logger.warning(
+                        f"[衰减调度] 记忆整合失败: {consolidation_err}",
+                        exc_info=True,
+                    )
+
             return True
         except Exception as e:
             logger.error(f"[衰减调度] 执行衰减失败: {e}", exc_info=True)
