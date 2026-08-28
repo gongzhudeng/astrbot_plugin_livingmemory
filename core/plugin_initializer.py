@@ -125,6 +125,14 @@ class PluginInitializer:
         self._shutdown_requested = False
         self._on_initialized: Any | None = None
 
+        # 后台索引维护（启动阶段只调度，不阻塞初始化）
+        self._maintenance_task: asyncio.Task | None = None
+        self.maintenance_status: dict[str, Any] = {
+            "state": "idle",
+            "reason": "",
+            "updated_at": None,
+        }
+
     def set_initialized_callback(self, callback: Any | None) -> None:
         """Set the callback invoked after a successful initialization attempt."""
         self._on_initialized = callback
@@ -671,9 +679,10 @@ class PluginInitializer:
             )
             logger.info("MemoryProcessor 已初始化")
 
-            # 初始化索引验证器并自动重建索引
+            # 初始化索引验证器；一致性检查与自动重建调度到后台执行，
+            # 避免大规模索引维护阻塞插件启动（结果通过 /lmem status 暴露）
             self.index_validator = IndexValidator(str(db_path), self.db)
-            await self._auto_rebuild_index_if_needed()
+            self._schedule_background_maintenance()
 
             # 异步初始化 TextProcessor
             if self.memory_engine and hasattr(self.memory_engine, "text_processor"):
@@ -804,11 +813,29 @@ class PluginInitializer:
         except Exception as e:
             logger.error(f"数据库迁移检查失败: {e}", exc_info=True)
 
+    def _schedule_background_maintenance(self) -> None:
+        """Schedule index consistency check/repair as a tracked background task."""
+        if self._maintenance_task and not self._maintenance_task.done():
+            return
+        self._maintenance_task = asyncio.create_task(
+            self._auto_rebuild_index_if_needed()
+        )
+
+    def _set_maintenance_status(self, state: str, reason: str = "") -> None:
+        """Update the background index maintenance status exposed via /lmem status."""
+        self.maintenance_status = {
+            "state": state,
+            "reason": reason,
+            "updated_at": time.time(),
+        }
+
     async def _auto_rebuild_index_if_needed(self):
-        """自动检查并重建索引"""
+        """自动检查并重建索引（后台执行，不阻塞插件启动）"""
         try:
             if not self.index_validator or not self.memory_engine:
                 return
+
+            self._set_maintenance_status("checking")
 
             # 检查v1迁移状态
             (
@@ -818,7 +845,10 @@ class PluginInitializer:
 
             if needs_migration_rebuild:
                 logger.info(f"检测到 v1 迁移数据需要重建索引（{pending_count} 条文档）")
-                logger.info("开始自动重建索引。")
+                logger.info("开始在后台自动重建索引。")
+                self._set_maintenance_status(
+                    "rebuilding", f"v1 迁移数据 {pending_count} 条"
+                )
 
                 result = await self.index_validator.rebuild_indexes(self.memory_engine)
 
@@ -826,8 +856,15 @@ class PluginInitializer:
                     logger.info(
                         f"索引自动重建完成: 成功 {result['processed']} 条, 失败 {result['errors']} 条"
                     )
+                    self._set_maintenance_status(
+                        "ok",
+                        f"重建完成: 成功 {result['processed']} 条, 失败 {result['errors']} 条",
+                    )
                 else:
                     logger.error(f"索引自动重建失败: {result.get('message')}")
+                    self._set_maintenance_status(
+                        "failed", str(result.get("message", ""))
+                    )
                 return
 
             # 检查索引一致性
@@ -838,7 +875,8 @@ class PluginInitializer:
                 logger.info(
                     f"当前索引计数 - Documents: {status.documents_count}, BM25: {status.bm25_count}, Vector: {status.vector_count}"
                 )
-                logger.info("开始自动重建索引。")
+                logger.info("开始在后台自动重建索引。")
+                self._set_maintenance_status("rebuilding", str(status.reason))
 
                 result = await self.index_validator.rebuild_indexes(self.memory_engine)
 
@@ -846,13 +884,25 @@ class PluginInitializer:
                     logger.info(
                         f"索引自动重建完成: 成功 {result['processed']} 条, 失败 {result['errors']} 条"
                     )
+                    self._set_maintenance_status(
+                        "ok",
+                        f"重建完成: 成功 {result['processed']} 条, 失败 {result['errors']} 条",
+                    )
                 else:
                     logger.error(f"索引自动重建失败: {result.get('message')}")
+                    self._set_maintenance_status(
+                        "failed", str(result.get("message", ""))
+                    )
             else:
                 logger.info(f"索引一致性检查通过: {status.reason}")
+                self._set_maintenance_status("ok", str(status.reason))
 
+        except asyncio.CancelledError:
+            self._set_maintenance_status("cancelled", "插件关闭时取消")
+            raise
         except Exception as e:
             logger.error(f"自动重建索引失败: {e}", exc_info=True)
+            self._set_maintenance_status("failed", str(e))
 
     async def _repair_message_counts(self, conversation_store: ConversationStore):
         """修复会话表中 message_count 与实际消息数量不一致的问题"""
@@ -1016,7 +1066,7 @@ class PluginInitializer:
             self.decay_scheduler = None
 
     async def stop_background_tasks(self) -> None:
-        """停止初始化阶段的后台任务（如Provider重试）"""
+        """停止初始化阶段的后台任务（如Provider重试、索引维护）"""
         self._shutdown_requested = True
         if self._retry_task and not self._retry_task.done():
             self._retry_task.cancel()
@@ -1025,3 +1075,10 @@ class PluginInitializer:
             except asyncio.CancelledError:
                 pass
         self._retry_task = None
+        if self._maintenance_task and not self._maintenance_task.done():
+            self._maintenance_task.cancel()
+            try:
+                await self._maintenance_task
+            except asyncio.CancelledError:
+                pass
+        self._maintenance_task = None

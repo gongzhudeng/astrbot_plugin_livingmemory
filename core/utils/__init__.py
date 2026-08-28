@@ -299,6 +299,41 @@ def get_now_datetime_from_context(context: Context) -> datetime:
         return get_now_datetime()
 
 
+def _memory_injection_content(content: Any, metadata: Any) -> str:
+    """选择注入展示内容，避免 key_facts 与正文重复（移植上游 #202/#223）。
+
+    检索语料使用完整 content（人格化摘要 + 关键事实），注入展示优先使用
+    人格化摘要通道（persona_summary）；旧版 v2 记录缺少该通道时，仅当
+    正文以精确的 " | key_facts" 后缀结尾才截去，普通旧记录保持原文。
+
+    Args:
+        content: 记忆存储的完整正文。
+        metadata: 记忆元数据字典（或未解析的原始值）。
+
+    Returns:
+        用于注入展示的记忆正文。
+    """
+    raw_content = str(content or "").strip()
+    if isinstance(metadata, dict):
+        persona_summary = metadata.get("persona_summary")
+        if isinstance(persona_summary, str) and persona_summary.strip():
+            return persona_summary.strip()
+
+        # 早期 v2 记录以 "persona | key_facts" 作为检索正文但没有可用的
+        # persona_summary，只剥离精确匹配的后缀，绝不启发式缩短旧内容。
+        if metadata.get("summary_schema_version") == "v2":
+            key_facts = metadata.get("key_facts")
+            if isinstance(key_facts, list):
+                facts = [
+                    str(fact).strip() for fact in key_facts[:5] if str(fact).strip()
+                ]
+                for separator in ("；", "; "):
+                    suffix = " | " + separator.join(facts)
+                    if facts and raw_content.endswith(suffix):
+                        return raw_content[: -len(suffix)].strip()
+    return raw_content
+
+
 def format_memories_for_injection(memories: list) -> str:
     """
     将检索到的记忆列表格式化为单个字符串，以便注入到 System Prompt。
@@ -410,8 +445,9 @@ def format_memories_for_injection(memories: list) -> str:
             if metadata_parts:
                 entry_parts.append(" | ".join(metadata_parts))
 
-            # 添加记忆内容
-            entry_parts.append(content)
+            # 添加记忆内容（检索用完整 content，注入展示去重 key_facts）
+            display_content = _memory_injection_content(content, metadata)
+            entry_parts.append(display_content)
 
             entry = "\n".join(entry_parts)
             formatted_entries.append(entry)

@@ -113,13 +113,21 @@ class IndexValidator:
                     bm25_result = await cursor.fetchone()
                     bm25_count = bm25_result[0] if bm25_result else 0
 
+                    # 直接在 SQL 层计算 BM25 缺失数量，避免加载全量 ID 集合到内存。
                     cursor = await db.execute(
-                        "SELECT DISTINCT doc_id FROM livingmemory_memories_fts"
+                        """
+                        SELECT COUNT(*) FROM documents d
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM livingmemory_memories_fts f
+                            WHERE f.doc_id = d.id
+                        )
+                        """
                     )
-                    bm25_ids = {row[0] for row in await cursor.fetchall()}
+                    missing_result = await cursor.fetchone()
+                    missing_in_bm25 = missing_result[0] if missing_result else 0
                 else:
                     bm25_count = 0
-                    bm25_ids = set()
+                    missing_in_bm25 = 0
 
                 # 3. 检查向量索引
                 vector_count = 0
@@ -149,7 +157,6 @@ class IndexValidator:
                     logger.warning(f"检查向量索引失败: {e}")
 
                 # 4. 计算差异
-                missing_in_bm25 = len(doc_ids - bm25_ids)
                 if vector_ids:
                     missing_in_vector = len(doc_ids - vector_ids)
                 else:
@@ -990,49 +997,3 @@ class IndexValidator:
                 ),
                 "error": str(e),
             }
-
-    async def _try_restore_from_backup(self) -> None:
-        """
-        重建失败时尝试从备份表恢复 documents 数据。
-        仅在备份表存在且 documents 表为空时执行恢复。
-        """
-        try:
-            async with sqlite_connection(self.db_path) as db:
-                await db.execute("PRAGMA busy_timeout = 10000")
-
-                # 检查备份表是否存在
-                cursor = await db.execute("""
-                    SELECT name FROM sqlite_master
-                    WHERE type='table' AND name='_documents_rebuild_backup'
-                """)
-                if not await cursor.fetchone():
-                    return
-
-                # 只在 documents 表为空时恢复（避免覆盖部分重建的数据）
-                cursor = await db.execute("SELECT COUNT(*) FROM documents")
-                row = await cursor.fetchone()
-                doc_count = row[0] if row else 0
-
-                if doc_count > 0:
-                    logger.warning(
-                        f"documents 表已有 {doc_count} 条数据，跳过备份恢复（避免重复）"
-                    )
-                    return
-
-                logger.warning("检测到重建失败且 documents 表为空，正在从备份表恢复...")
-                await db.execute("""
-                    INSERT INTO documents (id, doc_id, text, metadata, created_at, updated_at)
-                    SELECT id, doc_id, text, metadata, created_at, updated_at
-                    FROM _documents_rebuild_backup
-                """)
-                await db.commit()
-
-                cursor = await db.execute("SELECT COUNT(*) FROM documents")
-                row = await cursor.fetchone()
-                restored = row[0] if row else 0
-                logger.info(
-                    f"已从备份表恢复 {restored} 条记忆数据，BM25/向量索引需手动重建"
-                )
-
-        except Exception as e:
-            logger.error(f"从备份表恢复失败: {e}", exc_info=True)

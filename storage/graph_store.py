@@ -9,9 +9,11 @@ from typing import Any
 
 import aiosqlite
 
+from astrbot.api import logger
+
 from ..core.models.graph_models import GraphEdge, GraphEntry, GraphNode
-from .sqlite_utils import sqlite_connection
 from ..core.utils.number_utils import safe_float
+from .sqlite_utils import sqlite_connection
 
 
 class GraphStore:
@@ -319,7 +321,7 @@ class GraphStore:
             old_conf = float(semantic_row[1] or 0.8)
             old_weight = float(semantic_row[2] or 1.0)
             merged_confidence = old_conf * 0.7 + edge.confidence * 0.3
-            merged_weight = old_weight + 0.15
+            merged_weight = old_weight + edge.weight * 0.15
             await db.execute(
                 """
                 UPDATE graph_edges
@@ -337,6 +339,12 @@ class GraphStore:
                 source_memory_id, weight, confidence, status,
                 metadata, created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(edge_key) DO UPDATE SET
+                weight = excluded.weight,
+                confidence = excluded.confidence,
+                status = excluded.status,
+                metadata = excluded.metadata,
+                updated_at = excluded.updated_at
             """,
             (
                 edge.edge_key,
@@ -647,20 +655,25 @@ class GraphStore:
 
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                f"""
-                SELECT ge.id, ge.source_memory_id, ge.content, ge.metadata,
-                       ge.entry_type, ge.relation_type, ge.session_id, ge.persona_id,
-                       bm25(livingmemory_graph_entries_fts) AS score
-                FROM livingmemory_graph_entries_fts
-                JOIN graph_entries ge ON ge.id = livingmemory_graph_entries_fts.entry_id
-                WHERE livingmemory_graph_entries_fts MATCH ? {where_clause}
-                ORDER BY score ASC
-                LIMIT ?
-                """,
-                (*params, limit),
-            )
-            rows = await cursor.fetchall()
+            try:
+                cursor = await db.execute(
+                    f"""
+                    SELECT ge.id, ge.source_memory_id, ge.content, ge.metadata,
+                           ge.entry_type, ge.relation_type, ge.session_id, ge.persona_id,
+                           bm25(livingmemory_graph_entries_fts) AS score
+                    FROM livingmemory_graph_entries_fts
+                    JOIN graph_entries ge ON ge.id = livingmemory_graph_entries_fts.entry_id
+                    WHERE livingmemory_graph_entries_fts MATCH ? {where_clause}
+                    ORDER BY score ASC
+                    LIMIT ?
+                    """,
+                    (*params, limit),
+                )
+                rows = await cursor.fetchall()
+            except Exception as e:
+                # 非法 FTS 查询不应中断整条图路由检索
+                logger.warning(f"[GraphStore] FTS 检索失败，已跳过图关键词路: {e}")
+                rows = []
 
         if not rows:
             return []

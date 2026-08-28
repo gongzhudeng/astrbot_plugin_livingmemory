@@ -110,8 +110,7 @@ class DBMigration:
             recheck = [str(row[0]) for row in await cursor.fetchall()]
             if recheck != ["ok"]:
                 raise RuntimeError(
-                    "SQLite 索引重建后完整性检查仍失败: "
-                    + "; ".join(recheck[:5])
+                    "SQLite 索引重建后完整性检查仍失败: " + "; ".join(recheck[:5])
                 )
 
             logger.info("SQLite 派生索引已重建并通过完整性检查")
@@ -176,7 +175,25 @@ class DBMigration:
                     logger.info(f"当前数据库版本: {version}")
                     return version
                 else:
-                    return 1
+                    # 版本表存在但为空（initialize_version_table 刚创建或迁移中断）。
+                    # 不能直接判为 v1，否则全新库也会跑完整迁移链；根据 documents
+                    # 表是否有数据区分旧库与全新库。
+                    cursor = await db.execute("""
+                        SELECT name FROM sqlite_master
+                        WHERE type='table' AND name='documents'
+                    """)
+                    has_documents = await cursor.fetchone()
+                    if has_documents:
+                        cursor = await db.execute("SELECT COUNT(*) FROM documents")
+                        doc_count_row = await cursor.fetchone()
+                        doc_count = doc_count_row[0] if doc_count_row else 0
+                        if doc_count > 0:
+                            logger.info(
+                                f"检测到旧版本数据库（空版本表，有{doc_count}条数据），当前版本: 1"
+                            )
+                            return 1
+                    logger.info("检测到全新数据库（空版本表且无数据），视为最新版本")
+                    return self.CURRENT_VERSION
 
         except Exception as e:
             logger.error(f"获取数据库版本失败: {e}", exc_info=True)
@@ -825,6 +842,7 @@ class DBMigration:
                         WHERE json_valid(
                             COALESCE(NULLIF(TRIM(COALESCE(metadata, '')), ''), '{}')
                         )
+                          AND json_extract(metadata, '$.access_count') IS NULL
                         """
                     )
 

@@ -363,18 +363,26 @@ class MemoryEngine:
                         current_payload = {}
                 current_payload.update(payload_patch)
 
-            fields = ["status = ?", "step = ?", "updated_at = ?"]
-            params: list[Any] = [status, step, time.time()]
+            fields = ["step = ?", "updated_at = ?"]
+            params: list[Any] = [step, time.time()]
             if memory_id is not None:
                 fields.append("memory_id = ?")
                 params.append(memory_id)
             if error is not None:
                 fields.append("error = ?")
                 params.append(error[:1000])
-                if status != "completed":
-                    fields.append("retry_count = retry_count + 1")
-            elif status == "completed":
-                fields.append("error = NULL")
+                fields.append("retry_count = retry_count + 1")
+                # 达到重试上限后转为终态 failed，避免待修复记录永久滞留。
+                fields.append(
+                    "status = CASE WHEN retry_count + 1 >= ? THEN 'failed' ELSE ? END"
+                )
+                params.append(self._write_op_max_retries)
+                params.append(status)
+            else:
+                fields.append("status = ?")
+                params.append(status)
+                if status == "completed":
+                    fields.append("error = NULL")
             if payload_patch:
                 fields.append("payload = ?")
                 params.append(json.dumps(current_payload, ensure_ascii=False))
@@ -710,6 +718,19 @@ class MemoryEngine:
             )
             return False
 
+        if self.db_connection is not None:
+            # 先重放 documents/向量/BM25 的删除，对齐正常删除流程。若进程
+            # 在该步骤之前或期间崩溃，文档必须在此补删；否则图/原子数据已
+            # 删除的记忆仍会被检索到，造成不一致。
+            cursor = await self.db_connection.execute(
+                "SELECT 1 FROM documents WHERE id = ?", (int(memory_id),)
+            )
+            if (
+                await cursor.fetchone() is not None
+                and self.hybrid_retriever is not None
+            ):
+                await self.hybrid_retriever.delete_memory(int(memory_id))
+            await self.db_connection.commit()
         if self.graph_memory_manager is not None:
             await self.graph_memory_manager.delete_memory(int(memory_id))
         if self.atom_store is not None:
@@ -1186,9 +1207,10 @@ class MemoryEngine:
         cache_key = self._search_cache_key(query, k, session_id, persona_id)
         cached_results = self._get_cached_search_results(cache_key)
         if cached_results is not None:
-            for result in cached_results:
+            cached_doc_ids = [result.doc_id for result in cached_results]
+            if cached_doc_ids:
                 self._create_tracked_task(
-                    self._update_access_time_internal(result.doc_id)
+                    self._update_access_times_internal(cached_doc_ids)
                 )
             return cached_results
 
@@ -1216,9 +1238,12 @@ class MemoryEngine:
                 query, k, session_id, persona_id
             )
 
-        # 异步更新访问时间(不阻塞返回)
-        for result in results:
-            self._create_tracked_task(self._update_access_time_internal(result.doc_id))
+        # 异步更新访问时间(不阻塞返回，整批一次提交)
+        result_doc_ids = [result.doc_id for result in results]
+        if result_doc_ids:
+            self._create_tracked_task(
+                self._update_access_times_internal(result_doc_ids)
+            )
 
         self._set_cached_search_results(cache_key, results)
         return results
@@ -1598,30 +1623,39 @@ class MemoryEngine:
                 "SELECT id, metadata FROM documents WHERE json_extract(metadata, '$.importance') IS NOT NULL OR metadata LIKE '%\"importance\"%'"
             )
             rows = await cursor.fetchall()
-            updates: list[tuple[str, int]] = []
 
-            for row in rows:
-                metadata = self._safe_json_dict(row["metadata"])
-                importance = clamp_float(metadata.get("importance"), default=0.5)
-                access_count = safe_float(metadata.get("access_count"), 0.0)
-                last_access_time = safe_float(metadata.get("last_access_time"), 0.0)
+            safe_json_dict = self._safe_json_dict
 
-                recent_access_factor = (
-                    1.0 if last_access_time >= access_window_start else 0.5
-                )
-                access_factor = min(1.0, access_count / max(1.0, max_access_count))
-                effective_decay_rate = decay_rate * (
-                    1 - 0.5 * access_factor * recent_access_factor
-                )
-                decay_factor = (1 - effective_decay_rate) ** days
-                metadata["importance"] = max(
-                    0.01,
-                    round(importance * decay_factor, 4),
-                )
-                metadata["access_count"] = int(access_count * access_decay_multiplier)
-                updates.append(
-                    (json.dumps(metadata, ensure_ascii=False), int(row["id"]))
-                )
+            def _compute_updates() -> list[tuple[str, int]]:
+                updates: list[tuple[str, int]] = []
+                for row in rows:
+                    metadata = safe_json_dict(row["metadata"])
+                    importance = clamp_float(metadata.get("importance"), default=0.5)
+                    access_count = safe_float(metadata.get("access_count"), 0.0)
+                    last_access_time = safe_float(metadata.get("last_access_time"), 0.0)
+
+                    recent_access_factor = (
+                        1.0 if last_access_time >= access_window_start else 0.5
+                    )
+                    access_factor = min(1.0, access_count / max(1.0, max_access_count))
+                    effective_decay_rate = decay_rate * (
+                        1 - 0.5 * access_factor * recent_access_factor
+                    )
+                    decay_factor = (1 - effective_decay_rate) ** days
+                    metadata["importance"] = max(
+                        0.01,
+                        round(importance * decay_factor, 4),
+                    )
+                    metadata["access_count"] = int(
+                        access_count * access_decay_multiplier
+                    )
+                    updates.append(
+                        (json.dumps(metadata, ensure_ascii=False), int(row["id"]))
+                    )
+                return updates
+
+            # 卸载逐行 JSON 解析与数值计算，避免阻塞事件循环。
+            updates = await asyncio.to_thread(_compute_updates)
 
             if not updates:
                 return 0
@@ -1660,10 +1694,25 @@ class MemoryEngine:
         """
         return await self._update_access_time_internal(memory_id)
 
-    @with_sqlite_lock(lambda self, *args, **kwargs: self.db_path)
     async def _update_access_time_internal(self, memory_id: int) -> bool:
-        """内部方法:更新访问时间（直接更新documents表，不经过FAISS）"""
-        import json
+        """内部方法:原子式更新单条记忆的访问时间与访问计数"""
+        return await self._update_access_times_internal([memory_id])
+
+    async def _update_access_times_internal(self, doc_ids: list[int]) -> bool:
+        """内部方法:以单条原子 SQL 批量更新访问时间与访问计数。
+
+        使用 json_set 原子更新，避免并发召回任务对同一记忆的读改写丢失
+        更新；多条结果合并为一次 commit 以降低写放大。
+
+        Args:
+            doc_ids: 需要更新访问时间的文档 ID 列表。
+
+        Returns:
+            bool: 是否至少更新了一条记录。
+        """
+        unique_ids = list(dict.fromkeys(int(doc_id) for doc_id in doc_ids))
+        if not unique_ids:
+            return False
 
         current_time = time.time()
 
@@ -1671,51 +1720,38 @@ class MemoryEngine:
             if self.db_connection is None:
                 return False
 
-            # 直接更新 documents 表，不经过 FAISS
-            # 1. 获取当前 metadata
+            placeholders = ",".join("?" * len(unique_ids))
             cursor = await self.db_connection.execute(
-                "SELECT metadata FROM documents WHERE id = ?", (memory_id,)
-            )
-            row = await cursor.fetchone()
-
-            if not row:
-                return False
-
-            # 2. 解析并更新 metadata
-            metadata_str = row[0] if row and row[0] else "{}"
-            try:
-                metadata = (
-                    json.loads(metadata_str)
-                    if isinstance(metadata_str, str)
-                    else metadata_str
-                )
-                if not isinstance(metadata, dict):
-                    metadata = {}
-            except (json.JSONDecodeError, TypeError):
-                metadata = {}
-
-            metadata["last_access_time"] = current_time
-            try:
-                access_count = int(metadata.get("access_count", 0) or 0)
-            except (TypeError, ValueError):
-                access_count = 0
-            metadata["access_count"] = min(access_count + 1, 1_000_000)
-
-            # 3. 写回 documents 表
-            await self.db_connection.execute(
-                "UPDATE documents SET metadata = ? WHERE id = ?",
-                (json.dumps(metadata, ensure_ascii=False), memory_id),
+                f"""
+                UPDATE documents
+                SET metadata = CASE
+                    WHEN json_valid(metadata) THEN json_set(
+                        json_set(metadata, '$.last_access_time', ?),
+                        '$.access_count',
+                        MIN(
+                            COALESCE(
+                                CAST(json_extract(metadata, '$.access_count') AS INTEGER),
+                                0
+                            ) + 1,
+                            1000000
+                        )
+                    )
+                    ELSE json_set('{{}}', '$.last_access_time', ?, '$.access_count', 1)
+                END
+                WHERE id IN ({placeholders})
+                """,
+                (current_time, current_time, *unique_ids),
             )
             await self.db_connection.commit()
 
-            return True
+            return cursor.rowcount > 0
 
         except asyncio.CancelledError:
             raise
         except Exception as e:
             # 记录错误但不影响查询流程
             logger.warning(
-                f"更新访问时间失败 (memory_id={memory_id}): {e}",
+                f"批量更新访问时间失败 (doc_ids={unique_ids}): {e}",
                 exc_info=True,
             )
             return False
@@ -1738,70 +1774,35 @@ class MemoryEngine:
         # 【关键修改】不再提取UUID，直接使用完整的session_id进行匹配
         # 因为现在数据库中存储的就是完整的unified_msg_origin格式
 
-        # 使用数据库层面的排序和分页，避免加载所有数据
+        # 使用数据库层面的过滤、排序和分页，避免加载所有数据
         try:
-            # 先获取总数判断是否需要分批
-            total_count = await self.faiss_db.document_storage.count_documents(
-                metadata_filters={"session_id": session_id}
-            )
-
-            if total_count == 0:
+            if self.db_connection is None:
                 return []
 
-            # 如果总数小于等于limit，直接一次性获取
-            if total_count <= limit:
-                all_docs = await self.faiss_db.document_storage.get_documents(
-                    metadata_filters={"session_id": session_id},
-                    limit=limit,
-                    offset=0,
-                )
-                # 通过线程池批量规范化 metadata（避免大量 json.loads 阻塞事件循环）
-                all_docs = await asyncio.to_thread(
-                    self._normalize_batch_metadata, all_docs
-                )
-                sorted_docs = sorted(
-                    all_docs,
-                    key=lambda d: safe_float(
-                        d.get("metadata", {}).get("create_time"), 0.0
-                    ),
-                    reverse=True,
-                )
-            else:
-                all_docs = []
-                batch_size = 500
-                offset = 0
+            cursor = await self.db_connection.execute(
+                """
+                SELECT id, text, metadata
+                FROM documents
+                WHERE json_extract(metadata, '$.session_id') = ?
+                ORDER BY CAST(json_extract(metadata, '$.create_time') AS REAL) DESC
+                LIMIT ?
+                """,
+                (session_id, limit),
+            )
+            rows = await cursor.fetchall()
 
-                while offset < total_count:
-                    batch = await self.faiss_db.document_storage.get_documents(
-                        metadata_filters={"session_id": session_id},
-                        limit=batch_size,
-                        offset=offset,
-                    )
-
-                    if not batch:
-                        break
-
-                    batch = await asyncio.to_thread(
-                        self._normalize_batch_metadata, batch
-                    )
-                    all_docs.extend(batch)
-                    offset += batch_size
-
-                sorted_docs = sorted(
-                    all_docs,
-                    key=lambda d: safe_float(
-                        d.get("metadata", {}).get("create_time"), 0.0
-                    ),
-                    reverse=True,
-                )[:limit]
+            safe_json_dict = self._safe_json_dict
+            parsed = await asyncio.to_thread(
+                lambda: [safe_json_dict(r["metadata"]) for r in rows]
+            )
 
             memories = []
-            for doc in sorted_docs:
+            for row, metadata in zip(rows, parsed):
                 memories.append(
                     {
-                        "id": doc["id"],
-                        "text": doc["text"],
-                        "metadata": doc["metadata"],
+                        "id": int(row["id"]),
+                        "text": row["text"],
+                        "metadata": metadata,
                     }
                 )
 
@@ -1978,31 +1979,28 @@ class MemoryEngine:
 
         cutoff_time = time.time() - (days * 86400)
 
-        # 分批扫描文档并删除，避免一次性加载所有数据到内存
+        # 主键 keyset 分页流式扫描，避免 OFFSET 分页的 O(N²) 开销
         try:
-            # 先获取总数
-            total_count = await self.faiss_db.document_storage.count_documents(
-                metadata_filters={}
-            )
-
-            if total_count == 0:
+            if self.db_connection is None:
                 return 0
 
             batch_size = 500
-            offset = 0
+            last_id = 0
             to_delete_ids: list[int] = []
 
             # First pass: scan candidates without deleting to avoid offset-shift skips.
-            while offset < total_count:
-                batch_docs = await self.faiss_db.document_storage.get_documents(
-                    metadata_filters={}, limit=batch_size, offset=offset
+            while True:
+                cursor = await self.db_connection.execute(
+                    "SELECT id, metadata FROM documents WHERE id > ? ORDER BY id LIMIT ?",
+                    (last_id, batch_size),
                 )
-
-                if not batch_docs:
+                rows = await cursor.fetchall()
+                if not rows:
                     break
+                last_id = int(rows[-1]["id"])
 
                 batch_docs = await asyncio.to_thread(
-                    self._normalize_batch_metadata, batch_docs
+                    self._normalize_batch_metadata, [dict(r) for r in rows]
                 )
 
                 for doc in batch_docs:
@@ -2015,10 +2013,6 @@ class MemoryEngine:
 
                     if create_time < cutoff_time and doc_importance < importance:
                         to_delete_ids.append(doc["id"])
-
-                offset += len(batch_docs)
-                if len(batch_docs) < batch_size:
-                    break
 
             if not to_delete_ids:
                 return 0
@@ -2207,22 +2201,23 @@ class MemoryEngine:
             oldest_time = None
             newest_time = None
 
-            # 分批处理，每次加载500条，避免内存问题
+            # 主键 keyset 分页流式扫描，避免 OFFSET 分页的 O(N²) 开销。
             batch_size = 500
-            offset = 0
+            last_id = 0
 
-            while offset < total_count:
-                # 获取一批文档
-                batch_docs = await self.faiss_db.document_storage.get_documents(
-                    metadata_filters={}, limit=batch_size, offset=offset
+            while True:
+                cursor = await self.db_connection.execute(
+                    "SELECT id, metadata FROM documents WHERE id > ? ORDER BY id LIMIT ?",
+                    (last_id, batch_size),
                 )
-
-                if not batch_docs:
+                rows = await cursor.fetchall()
+                if not rows:
                     break
+                last_id = int(rows[-1]["id"])
 
                 # 通过线程池批量规范化 metadata（避免大量 json.loads 阻塞事件循环）
                 batch_docs = await asyncio.to_thread(
-                    self._normalize_batch_metadata, batch_docs
+                    self._normalize_batch_metadata, [dict(r) for r in rows]
                 )
 
                 for doc in batch_docs:
@@ -2274,9 +2269,6 @@ class MemoryEngine:
                             oldest_time = create_time
                         if newest_time is None or create_time > newest_time:
                             newest_time = create_time
-
-                # 移动到下一批
-                offset += batch_size
 
             stats["sessions"] = session_counts
             stats["status_breakdown"] = status_breakdown

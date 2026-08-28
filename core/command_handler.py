@@ -29,6 +29,7 @@ class CommandHandler:
         index_validator: IndexValidator | None,
         memory_processor=None,
         initialization_status_callback=None,
+        maintenance_status_callback=None,
     ):
         """
         初始化命令处理器
@@ -41,6 +42,7 @@ class CommandHandler:
             index_validator: 索引验证器
             memory_processor: 记忆处理器（用于手动总结）
             initialization_status_callback: 初始化状态回调函数
+            maintenance_status_callback: 后台索引维护状态回调函数
         """
         self.context = context
         self.config_manager = config_manager
@@ -49,6 +51,7 @@ class CommandHandler:
         self.index_validator = index_validator
         self._memory_processor = memory_processor
         self.get_initialization_status = initialization_status_callback
+        self.get_maintenance_status = maintenance_status_callback
 
     @staticmethod
     def _format_error_message(
@@ -111,6 +114,18 @@ class CommandHandler:
                 last_update=last_update,
                 db_size=db_size,
             )
+
+            # 追加后台索引维护状态（idle 时不显示，避免噪音）
+            if self.get_maintenance_status is not None:
+                try:
+                    maintenance = self.get_maintenance_status() or {}
+                    state = str(maintenance.get("state") or "idle")
+                    if state != "idle":
+                        reason = str(maintenance.get("reason") or "")
+                        detail = f"{state} - {reason}" if reason else state
+                        message += "\n" + t("status.maintenance", detail=detail)
+                except Exception:
+                    logger.debug("读取索引维护状态失败", exc_info=True)
 
             yield event.plain_result(message)
         except Exception as e:
