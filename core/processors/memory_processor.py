@@ -219,6 +219,25 @@ class MemoryProcessor:
 {"summary": "摘要", "topics": ["主题"], "key_facts": ["事实"], "participants": ["参与者"], "sentiment": "neutral", "importance": 0.5}
 """
 
+    def _memory_language_directive(self) -> str:
+        """根据 memory_language 配置生成记忆总结语言指令。
+
+        zh（默认）= 中文总结，与既有行为一致；
+        mixed = 中英混合：总结主体用中文，但英文原词/原句必须照录不译，
+        便于日后召回时能引用用户实际使用过的英文表达。
+        """
+        language = str(self.config.get("memory_language", "zh") or "zh")
+        if language == "mixed":
+            return (
+                "\n记忆语言要求: 总结主体使用中文书写，但当对话中出现英文单词、短语或完整句子"
+                "（例如用户练习英语时的原句、被纠正的表达、生词），必须原样保留英文内容，"
+                "不要翻译或转写，并在 key_facts 中尽量引用这些英文原句。"
+            )
+        return (
+            "\n记忆语言要求: 总结使用中文书写；对话中出现的英文专有名词"
+            "（人名、地名、作品名、产品名等）保持原文。"
+        )
+
     async def _build_system_prompt_with_persona(self, persona_id: str | None) -> str:
         """
         构建包含人格提示的 system_prompt
@@ -235,6 +254,7 @@ class MemoryProcessor:
             f"当前日期时间: {current_date}\n"
             "重要: 请将对话中出现的相对时间表达（如\u201c今天\u201d、\u201c明天\u201d、\u201c昨天\u201d、\u201c下周\u201d、\u201c上个月\u201d等）"
             "转换为具体日期后再写入记忆，以便未来查阅时仍能准确理解时间信息。"
+            + self._memory_language_directive()
         )
 
         if not persona_id:

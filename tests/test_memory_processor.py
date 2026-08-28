@@ -492,8 +492,7 @@ async def test_dual_channel_summary_stores_canonical_and_persona():
         "我记录了张三明天下午三点开会呀，并认真给出了提醒"
     )
     assert content == (
-        "我记录了张三明天下午三点开会呀，并认真给出了提醒 | "
-        "张三明天下午三点开会"
+        "我记录了张三明天下午三点开会呀，并认真给出了提醒 | 张三明天下午三点开会"
     )
     assert importance == 0.8
     assert metadata.get("summary_schema_version") == "v2"
@@ -1202,3 +1201,23 @@ def test_private_prompt_requires_complete_bounded_emotional_facts():
 
     assert "控制在320个中文字符以内" in processor.private_chat_prompt
     assert "不能在半句话中间截断" in processor.private_chat_prompt
+
+
+def test_memory_language_directive_modes():
+    """memory_language 配置应生成对应的语言指令（zh 默认 / mixed 照录英文）。"""
+    from astrbot_plugin_livingmemory.core.processors.memory_processor import (
+        MemoryProcessor,
+    )
+
+    processor = MemoryProcessor(context=None, config={"memory_language": "mixed"})
+    mixed = processor._memory_language_directive()
+    assert "中文" in mixed
+    assert "原样保留英文" in mixed
+
+    processor_default = MemoryProcessor(context=None, config={})
+    zh = processor_default._memory_language_directive()
+    assert "中文" in zh
+    assert "原样保留英文" not in zh
+
+    processor_bad = MemoryProcessor(context=None, config={"memory_language": "xx"})
+    assert "中文" in processor_bad._memory_language_directive()

@@ -10,6 +10,16 @@
         ],
         "default": "zh"
     },
+    "memory_language": {
+        "description": "记忆总结语言",
+        "hint": "控制自动生成的记忆使用什么语言书写。中文=与既往行为一致；中英混合=总结主体用中文，但对话中的英文原词/原句照录不译（适合用 AI 练英语、希望记住自己用过的英文表达）。",
+        "type": "string",
+        "options": [
+            "zh",
+            "mixed"
+        ],
+        "default": "zh"
+    },
     "provider_settings": {
         "description": "模型提供商",
         "hint": "配置记忆系统使用的 AI 模型",
