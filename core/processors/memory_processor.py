@@ -586,6 +586,10 @@ class MemoryProcessor:
             content, metadata = self._build_storage_format(
                 fallback_excerpt, structured_data, is_group_chat
             )
+            # 稳定人物身份：以平台+发送者ID写入参与者身份，图谱据此复用节点
+            metadata["participant_identities"] = self._extract_participant_identities(
+                messages
+            )
             # 将质量标记写入 metadata
             metadata["summary_quality"] = structured_data.get("_quality", "normal")
             metadata["emotion_source_has_text"] = emotion_source_has_text
@@ -847,6 +851,44 @@ class MemoryProcessor:
         if is_bot:
             return f"[Bot: {display_name} | ID: {msg.sender_id} | {time_str}]"
         return f"[{display_name} | ID: {msg.sender_id} | {time_str}]"
+
+    @staticmethod
+    def _extract_participant_identities(
+        messages: list[Message],
+    ) -> list[dict[str, Any]]:
+        """Build stable graph identities from message sender IDs, not LLM names."""
+        identities: dict[str, dict[str, Any]] = {}
+        for message in messages:
+            if message.role == "system":
+                continue
+            sender_id = str(message.sender_id or "").strip()
+            if not sender_id:
+                continue
+            platform = str(message.platform or "unknown").strip().lower() or "unknown"
+            identity_key = f"{platform}:{sender_id}"
+            display_name = str(message.sender_name or sender_id).strip() or sender_id
+            is_bot = bool(
+                message.metadata.get("is_bot_message", False)
+                or message.role == "assistant"
+            )
+
+            identity = identities.setdefault(
+                identity_key,
+                {
+                    "identity_key": identity_key,
+                    "sender_id": sender_id,
+                    "platform": platform,
+                    "display_name": display_name,
+                    "aliases": [],
+                    "is_bot": is_bot,
+                },
+            )
+            identity["display_name"] = display_name
+            identity["is_bot"] = bool(identity["is_bot"] or is_bot)
+            if display_name not in identity["aliases"]:
+                identity["aliases"].append(display_name)
+
+        return list(identities.values())
 
     @classmethod
     def _message_content_to_text(cls, content: Any) -> str:
@@ -1118,9 +1160,7 @@ class MemoryProcessor:
 
         # Custom prompts may still provide a neutral summary for graph consumers.
         # Built-in prompts omit it, preserving the v2 field with rich text fallback.
-        canonical_summary = str(
-            structured_data.get("canonical_summary") or ""
-        ).strip()
+        canonical_summary = str(structured_data.get("canonical_summary") or "").strip()
         if not canonical_summary:
             canonical_summary = rich_content
 
@@ -1224,9 +1264,7 @@ class MemoryProcessor:
                 )
             except (TypeError, ValueError):
                 event_version = None
-            fact = _bound_complete_text(
-                raw.get("fact", ""), EMOTIONAL_FACT_MAX_CHARS
-            )
+            fact = _bound_complete_text(raw.get("fact", ""), EMOTIONAL_FACT_MAX_CHARS)
             if action not in actions:
                 continue
             if action == "create" and not fact:
@@ -1323,10 +1361,7 @@ class MemoryProcessor:
                 not item_id
                 or item_version is None
                 or confidence < 0.78
-                or (
-                    action != "complete"
-                    and evidence_speaker != "user"
-                )
+                or (action != "complete" and evidence_speaker != "user")
                 or (
                     action == "complete"
                     and evidence_speaker not in {"user", "assistant", "both"}

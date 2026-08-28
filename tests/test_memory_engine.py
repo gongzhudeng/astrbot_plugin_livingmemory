@@ -776,7 +776,9 @@ async def test_memory_engine_cleanup_zero_days_deletes_low_importance(tmp_path: 
     )
 
     # 确保 SQLite documents 表与 fake FAISS 存储保持一致。
-    now = time.time()
+    # create_time 取过去时刻，避免与 cleanup 的 cutoff 撞在同一时钟 tick 内
+    # （Windows time.time() 粒度约 15.6ms，严格小于比较会随机失败）。
+    now = time.time() - 1.0
     if engine.db_connection is not None:
         await engine.db_connection.execute(
             "INSERT OR REPLACE INTO documents "

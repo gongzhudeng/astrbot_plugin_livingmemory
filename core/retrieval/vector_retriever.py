@@ -331,3 +331,49 @@ class VectorRetriever:
 
             logger.error(f"[向量删除] 失败 (doc_id={doc_id}): {e}", exc_info=True)
             return False
+
+
+async def delete_faiss_documents_by_ids(
+    faiss_db,
+    doc_ids: list[int],
+) -> list[int] | None:
+    """Delete known FAISS document IDs with one index persistence operation.
+
+    Returns ``None`` when the installed AstrBot storage does not expose the
+    required bulk-capable primitives, allowing callers to use a compatibility
+    fallback.
+    """
+    if not doc_ids:
+        return []
+
+    embedding_storage = getattr(faiss_db, "embedding_storage", None)
+    document_storage = getattr(faiss_db, "document_storage", None)
+    embedding_delete = getattr(embedding_storage, "delete", None)
+    get_documents = getattr(document_storage, "get_documents", None)
+    delete_by_uuid = getattr(document_storage, "delete_document_by_doc_id", None)
+    if not (
+        callable(embedding_delete)
+        and callable(get_documents)
+        and callable(delete_by_uuid)
+    ):
+        return None
+
+    unique_ids = list(dict.fromkeys(int(doc_id) for doc_id in doc_ids))
+    documents = await get_documents(
+        metadata_filters={},
+        ids=unique_ids,
+        offset=0,
+        limit=len(unique_ids),
+    )
+    deletable = [doc for doc in documents if doc.get("doc_id")]
+    if not deletable:
+        return []
+
+    found_ids = [int(doc["id"]) for doc in deletable]
+    await embedding_delete(found_ids)
+    for document in deletable:
+        await delete_by_uuid(document["doc_id"])
+    return found_ids
+
+
+__all__ = ["VectorResult", "VectorRetriever", "delete_faiss_documents_by_ids"]

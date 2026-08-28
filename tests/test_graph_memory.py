@@ -495,3 +495,106 @@ async def test_graph_store_batch_delete_memories(tmp_path: Path):
     assert stats_after["graph_entries"] < stats_before["graph_entries"]
 
     await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_graph_vector_compresses_to_one_per_memory(tmp_path: Path):
+    """图向量按来源记忆压缩：多条 entry 只产生一个聚合向量。"""
+    db_path = tmp_path / "graph_compress.db"
+    graph_store = GraphStore(str(db_path))
+    await graph_store.initialize()
+
+    vector_db = _FakeFaissDB()
+    manager = GraphMemoryManager(
+        graph_store=graph_store,
+        graph_vector_retriever=GraphVectorRetriever(vector_db),
+        graph_extractor=GraphExtractor(),
+    )
+    metadata = {
+        "session_id": "test:private:s1",
+        "persona_id": "persona_1",
+        "importance": 0.8,
+        "create_time": 1.0,
+        "last_access_time": 1.0,
+        "canonical_summary": "项目会议安排在明天下午三点",
+        "topics": ["项目会议"],
+        "participants": ["张三"],
+        "key_facts": ["明天下午三点开会"],
+    }
+    await manager.index_memory(1, metadata["canonical_summary"], metadata)
+
+    assert len(vector_db.docs) == 1
+    doc = next(iter(vector_db.docs.values()))
+    assert doc["metadata"]["graph_vector_granularity"] == "memory"
+
+    # 重建同一条记忆不应累积向量（先删后加）
+    await manager.index_memory(1, metadata["canonical_summary"], metadata)
+    assert len(vector_db.docs) == 1
+
+
+def test_participant_nodes_use_stable_account_identity():
+    """有身份元数据时人物节点使用 account: 身份键，昵称变化可复用节点。"""
+    extractor = GraphExtractor()
+    metadata = {
+        "participants": ["小红"],
+        "participant_identities": [
+            {
+                "identity_key": "qq:10001",
+                "sender_id": "10001",
+                "platform": "qq",
+                "display_name": "小红",
+                "aliases": ["小红"],
+                "is_bot": False,
+            }
+        ],
+    }
+    resolved = extractor._participant_nodes(metadata)
+    assert len(resolved) == 1
+    display_name, canonical_value, extra = resolved[0]
+    assert display_name == "小红"
+    assert canonical_value.startswith("account:qq:10001")
+    assert extra["identity_key"] == "qq:10001"
+
+    # 无身份元数据时回退到昵称节点
+    fallback = extractor._participant_nodes({"participants": ["小红"]})
+    assert fallback[0][1] == "小红"
+
+
+def test_extract_from_atoms_skips_participant_topic_duplication():
+    """原子路径不再把已识别参与者重复生成为主题节点。"""
+    from astrbot_plugin_livingmemory.core.processors.graph_extractor import (
+        ExtractedGraph,
+    )
+
+    extractor = GraphExtractor()
+
+    @dataclass
+    class _Atom:
+        content: str
+        entities: list
+        confidence: float = 0.8
+        session_id: str | None = None
+        persona_id: str | None = None
+
+    metadata = {
+        "participants": ["张三"],
+        "participant_identities": [
+            {
+                "identity_key": "qq:10001",
+                "sender_id": "10001",
+                "platform": "qq",
+                "display_name": "张三",
+                "aliases": ["张三"],
+                "is_bot": False,
+            }
+        ],
+    }
+    graph = extractor._extract_from_atoms(
+        1, [_Atom(content="张三喜欢爬山", entities=["张三", "爬山"])], metadata
+    )
+    assert isinstance(graph, ExtractedGraph)
+    topic_values = {node.value for node in graph.nodes if node.node_type == "topic"}
+    person_values = {node.value for node in graph.nodes if node.node_type == "person"}
+    assert "爬山" in topic_values
+    assert "张三" not in topic_values
+    assert "张三" in person_values
