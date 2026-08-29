@@ -12,7 +12,12 @@
         "zh": "Chinese",
         "en": "English",
         "ru": "Russian"
-      }
+      },
+      "labels": [
+        "Chinese",
+        "English",
+        "Russian"
+      ]
     },
     "provider_settings": {
       "description": "Model Provider",
@@ -71,7 +76,15 @@
       },
       "injection_method": {
         "description": "Memory Injection Position",
-        "hint": "Where to inject memories into LLM requests. user_message_before: as a user message prefix; system_prompt: append to system prompt; user_message_after: as a user message suffix; fake_tool_call: inject as a fake tool call message pair into conversation history, letting the LLM naturally understand this as retrieval results."
+        "hint": "Where to inject memories into LLM requests. user_message_before: as a user message prefix; system_prompt: append to system prompt; user_message_after: as a user message suffix; fake_tool_call: inject as a fake tool call message pair into conversation history, letting the LLM naturally understand this as retrieval results.",
+        "labels": [
+          "Extra user content (default)",
+          "Before user message",
+          "After user message",
+          "Fake tool call",
+          "Fake tool call (DeepSeek V4 compat, deprecated)",
+          "System prompt (deprecated)"
+        ]
       },
       "auto_remove_injected": {
         "description": "Auto-Clear Old Injection Fragments",
@@ -224,6 +237,32 @@
       "cleanup_importance_threshold": {
         "description": "Cleanup Importance Threshold",
         "hint": "Only memories with importance below this value will be cleaned up. 0.3 means memories below 30% importance."
+      }
+    },
+    "memory_language": {
+      "labels": [
+        "Chinese (default)",
+        "Chinese-English mixed"
+      ]
+    },
+    "memory_consolidation": {
+      "trigger": {
+        "labels": [
+          "Daily schedule",
+          "On reflection"
+        ]
+      },
+      "granularity": {
+        "labels": [
+          "Per session",
+          "Semantic clustering"
+        ]
+      },
+      "keep_original": {
+        "labels": [
+          "Archive (recoverable)",
+          "Delete"
+        ]
       }
     }
   }

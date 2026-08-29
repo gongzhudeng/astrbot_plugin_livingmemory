@@ -8,6 +8,11 @@
             "en",
             "ru"
         ],
+        "labels": [
+            "中文",
+            "English",
+            "Русский"
+        ],
         "default": "zh"
     },
     "memory_language": {
@@ -17,6 +22,10 @@
         "options": [
             "zh",
             "mixed"
+        ],
+        "labels": [
+            "中文",
+            "中英混合"
         ],
         "default": "zh"
     },
@@ -162,6 +171,14 @@
                     "fake_tool_call",
                     "fake_tool_call_deepseek_v4",
                     "system_prompt"
+                ],
+                "labels": [
+                    "附加用户消息（默认）",
+                    "注入在用户消息之前",
+                    "注入在用户消息之后",
+                    "伪造工具调用",
+                    "伪造工具调用（DeepSeek V4 兼容，已弃用）",
+                    "系统提示词注入（已弃用）"
                 ]
             },
             "auto_remove_injected": {
@@ -535,6 +552,10 @@
                     "daily",
                     "reflection"
                 ],
+                "labels": [
+                    "每日定时执行",
+                    "每次反思时执行"
+                ],
                 "default": "daily"
             },
             "granularity": {
@@ -545,6 +566,10 @@
                     "session",
                     "semantic"
                 ],
+                "labels": [
+                    "按同一会话聚合",
+                    "跨会话语义聚类"
+                ],
                 "default": "session"
             },
             "keep_original": {
@@ -554,6 +579,10 @@
                 "options": [
                     "archive",
                     "delete"
+                ],
+                "labels": [
+                    "归档保留（可恢复）",
+                    "直接删除"
                 ],
                 "default": "archive"
             },
