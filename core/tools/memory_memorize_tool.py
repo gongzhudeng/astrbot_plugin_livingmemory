@@ -41,9 +41,7 @@ class MemoryMemorizeTool(FunctionTool[AstrAgentContext]):
 
     name: str = "memorize_long_term_memory"
     description: str = (
-        "Memorize durable long-term memory when the user explicitly asks to remember something, "
-        "or when stable preferences, identity details, agreements, or project context appear. "
-        "Write concise factual memory, not the full conversation."
+        "用户明确要求记住，或出现稳定偏好、身份信息、约定或项目背景时，写入长期记忆。"
     )
     parameters: dict[str, Any] = field(
         default_factory=lambda: {
@@ -51,33 +49,33 @@ class MemoryMemorizeTool(FunctionTool[AstrAgentContext]):
             "properties": {
                 "memory": {
                     "type": "string",
-                    "description": "Concise factual long-term memory to save. Do not copy the full conversation.",
+                    "description": "要保存的精炼、可长期复用的事实记忆。只写稳定偏好、身份信息、约定、承诺或项目背景，不要复制整段对话，也不要写临时闲聊或冗长推理。",
                 },
                 "topics": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Optional short topic tags for this memory, up to 5.",
+                    "description": "可选的简短主题标签，最多 5 个；使用便于后续检索的实体或主题词。",
                     "default": [],
                 },
                 "key_facts": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Optional key facts supporting the memory, up to 5.",
+                    "description": "可选的关键事实，最多 5 条；保留支撑该记忆的重要原始事实，不要复述完整对话。",
                     "default": [],
                 },
                 "sentiment": {
                     "type": "string",
-                    "description": "Sentiment of the memory: positive, neutral, or negative.",
+                    "description": "记忆情感：positive、neutral 或 negative。",
                     "default": "neutral",
                 },
                 "importance": {
                     "type": "number",
-                    "description": "Importance from 0.0 to 1.0. Use higher values for durable preferences, commitments, or identity facts.",
+                    "description": "重要度 0.0 至 1.0。稳定偏好、身份事实、明确承诺或长期项目背景使用较高值；普通补充信息使用较低值。",
                     "default": 0.7,
                 },
                 "reason": {
                     "type": "string",
-                    "description": "Optional short reason why this information should be remembered.",
+                    "description": "可选；简短说明为何值得长期记住，不要重复 memory 正文。",
                     "default": "",
                 },
             },

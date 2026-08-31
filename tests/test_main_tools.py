@@ -68,18 +68,35 @@ def test_register_llm_tools_defaults_only_recall():
     assert plugin._llm_tools_registered is True
 
 
-def test_recall_tool_exposes_chinese_description_without_changing_contract():
+def test_recall_tool_layers_routing_and_query_rules_without_changing_contract():
     tool = MemorySearchTool()
 
     assert tool.name == "recall_long_term_memory"
-    assert "长期记忆" in tool.description
-    assert "完整的用户消息" in tool.description
+    assert "过去的事实" in tool.description
+    assert "完整用户消息" not in tool.description
+    assert len(tool.description) < 60
     assert tool.parameters["required"] == ["query"]
     assert set(tool.parameters["properties"]) == {"query", "k"}
     assert tool.parameters["properties"]["query"]["type"] == "string"
     assert tool.parameters["properties"]["k"]["type"] == "integer"
     assert tool.parameters["properties"]["k"]["default"] == 5
-    assert "长期记忆" in tool.parameters["properties"]["query"]["description"]
+    query_description = tool.parameters["properties"]["query"]["description"]
+    assert "完整用户消息" in query_description
+    assert "再次调用" in query_description
+
+
+def test_memorize_tool_layers_memory_format_and_importance_rules():
+    tool = MemoryMemorizeTool()
+
+    assert tool.name == "memorize_long_term_memory"
+    assert len(tool.description) < 70
+    assert "稳定偏好" in tool.description
+    assert tool.parameters["required"] == ["memory"]
+    memory_description = tool.parameters["properties"]["memory"]["description"]
+    importance_description = tool.parameters["properties"]["importance"]["description"]
+    assert "不要复制整段对话" in memory_description
+    assert "临时闲聊" in memory_description
+    assert "身份事实" in importance_description
 
 
 def test_register_llm_tools_no_memory_engine():

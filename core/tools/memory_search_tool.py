@@ -33,12 +33,7 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
 
     name: str = "recall_long_term_memory"
     description: str = (
-        "当当前上下文不足时，回忆相关的长期记忆。"
-        "请使用简洁、聚焦的回忆关键词，不要复制完整的用户消息。"
-        "当用户询问过去的事实、偏好、约定或较早的上下文，"
-        "或者需要核实模糊指代时，调用此工具。"
-        "关键词优先使用简短主题、人物或事物名称、偏好、承诺或过去发生的事件。"
-        "如果第一次召回的信息不足，请优化关键词后再次召回。"
+        "当前上下文不足，需要回忆过去的事实、偏好、约定或较早上下文时使用。"
     )
     parameters: dict[str, Any] = field(
         default_factory=lambda: {
@@ -46,7 +41,7 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "用于检索长期记忆的简洁关键词。优先填写关键实体、主题、偏好、约定或过去发生的事件，不要复制完整的用户消息。",
+                    "description": "用于检索长期记忆的简洁、聚焦关键词。优先组织为关键实体、人物或事物名称、主题、偏好、承诺或过去发生的事件，不要复制完整用户消息。第一次召回不足时，应优化关键词后再次调用。",
                 },
                 "k": {
                     "type": "integer",

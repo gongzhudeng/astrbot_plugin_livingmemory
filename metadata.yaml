@@ -1,7 +1,7 @@
 name: astrbot_plugin_livingmemory
 display_name: "\u7075\u7280 \u00b7 \u957f\u671f\u8bb0\u5fc6\u63d2\u4ef6"
 description: "\u4e3a AstrBot \u63d0\u4f9b\u5b8c\u6574\u8bb0\u5fc6\u751f\u547d\u5468\u671f\u3001\u6df7\u5408\u68c0\u7d22\u548c\u76f8\u5173\u5ea6\u51c6\u5165\u7684\u667a\u80fd\u957f\u671f\u8bb0\u5fc6\u80fd\u529b\u3002"
-version: 2.7.0-gd.1
+version: 2.7.0-gd.2
 author: "\u7075\u7280"
 repo: https://github.com/gongzhudeng/astrbot_plugin_livingmemory
 credits: "\u539f\u59cb\u63d2\u4ef6\uff1alxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory v2.3.6\n\u539f\u4f5c\u8005\uff1alxfight\n\u539f\u9879\u76ee\uff1ahttps://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory\n"
