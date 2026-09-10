@@ -7,6 +7,17 @@
 
 ## [Unreleased]
 
+## [2.7.0-gd.5] - 2026-09-10
+
+### 新增
+- **Rerank 重排序接入混合检索**（移植上游 2.6.0，#252）：RRF 融合后把候选池（`recall_engine.rerank_candidates`，默认 20）交给 AstrBot 的 Rerank 提供商按查询相关性重打分，min-max 归一化后替代 RRF 排名参与加权，并截断回 top_k；提供商缺失/调用异常/返回为空时静默降级为原 RRF 排名。`score_breakdown` 新增 `rerank` 分量。**注意**：`min_relevance_score` 注入相关度准入仍使用原始向量/BM25 分数，不受重排序影响。
+- **记忆整合 WebUI 面板**（补齐上游 2.6.0-beta.2 前端）：系统概览页新增「记忆整合」面板（配置状态 + 已整合/已归档统计 + 立即整合按钮，强制触发忽略冷却）；记忆列表为整合产生的记忆显示「整合 N」徽标；记忆详情展示来源记忆列表。新增 Page API 路由 `consolidation/status`、`consolidation/run`。
+- **查询表达式索引**（移植上游 #254）：新增 `idx_doc_status`、`idx_doc_memory_type`、`idx_doc_create_time`（复合降序）三个表达式索引并纳入损坏自动重建注册表；WebUI 记忆列表查询去掉 `CASE WHEN json_valid` 包装，使过滤/排序表达式与索引逐字匹配，消除全表扫描 + 临时排序。
+
+### 修复
+- 无
+
+
 ## [2.7.0-gd.4] - 2026-09-10
 
 ### 新增

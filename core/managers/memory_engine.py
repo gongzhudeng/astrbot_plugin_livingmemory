@@ -8,6 +8,7 @@ import copy
 import json
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -85,6 +86,7 @@ class MemoryEngine:
         graph_vector_db=None,
         llm_provider=None,
         config: dict[str, Any] | None = None,
+        rerank_provider_resolver: Callable[[], Any] | None = None,
     ):
         """
         初始化记忆引擎
@@ -107,6 +109,7 @@ class MemoryEngine:
         self.graph_vector_db = graph_vector_db
         self.llm_provider = llm_provider
         self.config = config or {}
+        self.rerank_provider_resolver = rerank_provider_resolver
         self.graph_enabled = bool(self.config.get("graph_memory_enabled", False))
         self.atom_enabled = bool(
             self.config.get(
@@ -187,7 +190,11 @@ class MemoryEngine:
 
         # 7. 初始化混合检索器
         self.hybrid_retriever = HybridRetriever(
-            self.bm25_retriever, self.vector_retriever, self.rrf_fusion, self.config
+            self.bm25_retriever,
+            self.vector_retriever,
+            self.rrf_fusion,
+            self.config,
+            rerank_provider_resolver=self.rerank_provider_resolver,
         )
 
         if self.graph_enabled and self.graph_vector_db is not None:
@@ -417,6 +424,8 @@ class MemoryEngine:
             round(float(self.config.get("document_route_weight", 0.65)), 4),
             round(float(self.config.get("graph_route_weight", 0.35)), 4),
             int(self.config.get("graph_expansion_hops", 1)),
+            bool(self.config.get("rerank_enabled", False)),
+            int(self.config.get("rerank_candidates", 20)),
         )
 
     def _get_cached_search_results(
@@ -928,6 +937,25 @@ class MemoryEngine:
             await self.db_connection.execute("""
             CREATE INDEX IF NOT EXISTS idx_doc_last_access_metadata
             ON documents(json_extract(metadata, '$.last_access_time'))
+        """)
+            # 表达式索引：与召回/列表查询中的过滤、排序表达式逐字匹配，
+            # COALESCE/CAST 包装必须同时出现在索引与查询中才能被命中
+            await self.db_connection.execute("""
+            CREATE INDEX IF NOT EXISTS idx_doc_status
+            ON documents(COALESCE(json_extract(metadata, '$.status'), 'active'))
+        """)
+            await self.db_connection.execute("""
+            CREATE INDEX IF NOT EXISTS idx_doc_memory_type
+            ON documents(UPPER(COALESCE(json_extract(metadata, '$.memory_type'), 'GENERAL')))
+        """)
+            # 复合索引同时服务：近期记忆查询（create_time 范围 + 倒序截断）
+            # 与 WebUI 列表 created_desc/asc 排序（反向扫描即升序）
+            await self.db_connection.execute("""
+            CREATE INDEX IF NOT EXISTS idx_doc_create_time
+            ON documents(
+                COALESCE(CAST(json_extract(metadata, '$.create_time') AS REAL), 0) DESC,
+                id DESC
+            )
         """)
             await self.db_connection.execute("""
             CREATE INDEX IF NOT EXISTS idx_documents_doc_id

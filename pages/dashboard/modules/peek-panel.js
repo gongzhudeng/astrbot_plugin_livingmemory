@@ -120,6 +120,11 @@ export class PeekPanel {
     const created = detail.created_at || "--";
     const updated = detail.updated_at || "--";
     const sessionId = detail.session_id || "--";
+    const consolidatedFrom = Array.isArray(detail.consolidated_from)
+      ? detail.consolidated_from
+      : (detail.metadata && Array.isArray(detail.metadata.consolidated_from))
+        ? detail.metadata.consolidated_from
+        : [];
     const personaId = detail.persona_id || "--";
     const keyFacts = detail.key_facts || [];
     const topics = detail.topics || [];
@@ -165,6 +170,14 @@ export class PeekPanel {
     html += metaItem(window.t("detail.created"), esc(created));
     html += metaItem(window.t("detail.updated"), esc(updated));
     html += '</div></div>';
+
+    // 来源记忆（整合产生）
+    if (consolidatedFrom.length) {
+      html += '<div class="peek-section"><div class="peek-section-title">' + window.t("detail.consolidatedFrom", consolidatedFrom.length) + '</div>';
+      html += '<div class="peek-fact-list">';
+      consolidatedFrom.forEach(id => { html += '<div class="peek-fact-item"># ' + esc(String(id)) + '</div>'; });
+      html += '</div></div>';
+    }
 
     // 关键事实
     if (keyFacts.length) {

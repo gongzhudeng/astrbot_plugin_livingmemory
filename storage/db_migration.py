@@ -37,6 +37,18 @@ class DBMigration:
             "CREATE INDEX idx_doc_last_access_metadata "
             "ON documents(json_extract(metadata, '$.last_access_time'))"
         ),
+        "idx_doc_status": (
+            "CREATE INDEX idx_doc_status "
+            "ON documents(COALESCE(json_extract(metadata, '$.status'), 'active'))"
+        ),
+        "idx_doc_memory_type": (
+            "CREATE INDEX idx_doc_memory_type "
+            "ON documents(UPPER(COALESCE(json_extract(metadata, '$.memory_type'), 'GENERAL')))"
+        ),
+        "idx_doc_create_time": (
+            "CREATE INDEX idx_doc_create_time ON documents("
+            "COALESCE(CAST(json_extract(metadata, '$.create_time') AS REAL), 0) DESC, id DESC)"
+        ),
         "idx_documents_doc_id": (
             "CREATE INDEX idx_documents_doc_id ON documents(doc_id)"
         ),

@@ -278,6 +278,7 @@ import {
 
     memoryPage.initEventListeners();
     recallPage.initEventListeners();
+    systemPage.initEventListeners();
 
     document.getElementById("peek-close").addEventListener("click", () => peekPanel.close());
     document.getElementById("peek-overlay").addEventListener("click", () => peekPanel.close());
