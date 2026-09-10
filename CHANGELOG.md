@@ -7,6 +7,21 @@
 
 ## [Unreleased]
 
+## [2.7.0-gd.4] - 2026-09-10
+
+### 新增
+- **提示词管理页面**（移植上游 2.4.0）：Dashboard 新增「提示词管理」，按分类集中查看/编辑插件全部提示词模板（群聊/私聊记忆总结、记忆处理器 System Prompt、记忆注入头尾文本），支持保存自定义覆盖、载入默认内容、恢复默认；自定义内容存于插件数据目录 `data/prompts/`，升级不丢失。新增 Page API 路由 `prompts` / `prompts/detail` / `prompts/update` / `prompts/reset` / `prompts/default`。
+- **PromptManager**：提示词注册表 + 读取优先级（用户自定义 > 内置模板文件 > 硬编码兜底）+ 内存缓存；`memory_processor` 与注入文本格式化改为经 PromptManager 读取，WebUI 保存后即时生效。
+- **FAISS 索引异步落盘**（移植上游 2.6.1）：新增 `core/faiss_async_persist.py`，实例级替换 `save_index` 为「变更锁 + 单线程写盘 + 防抖合并（3s）+ 临时文件原子替换」，新增/删除记忆不再因大索引整文件同步写阻塞事件循环；terminate 与重建索引换文件前先排空未落盘变更，避免覆盖重建结果。
+
+### 修复
+- **Dashboard 存储型 XSS**：`esc()` 改为正则全量转义（补双引号/单引号），堵住 `value=`/`title=` 等属性上下文注入（`memory_type` 为 LLM 自由文本）。
+- **POST 请求默认不再重试**：带副作用的请求重试会导致重复写入（如记忆更新重建新 ID）；需要重试的调用可显式传 `{retries: n}`。
+
+### 保留
+- 内心世界插件对接链路完整保留：`private_chat_prompt.txt` 本地定制内容（`emotional_observations` / `attention_observations` / `mood_adjustment`）为内置默认模板，`emotion_review_context` 注入与 `_emotion_state_memory_summary` 回传不受影响；`min_relevance_score` 相关度准入、`llm_fallback_provider_ids` 兜底链、`memory_consolidation` 整合、`memory_language` 语言指令均正常。
+
+
 ## [2.7.0-gd.3] - 2026-09-10
 
 ### 新增

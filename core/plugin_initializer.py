@@ -22,6 +22,7 @@ from ..storage.db_migration import DBMigration
 from ..storage.sqlite_utils import with_sqlite_lock
 from .base.config_manager import ConfigManager
 from .base.exceptions import InitializationError, ProviderNotReadyError
+from .faiss_async_persist import install_async_persist
 from .managers.conversation_manager import ConversationManager
 from .managers.memory_engine import MemoryEngine
 from .processors.memory_processor import MemoryProcessor
@@ -104,6 +105,8 @@ class PluginInitializer:
         self.llm_provider: Provider | None = None
         self.db: Any | None = None
         self.graph_db: Any | None = None
+        # FAISS 索引异步落盘器（core/faiss_async_persist.py），随 db/graph_db 创建
+        self._index_persisters: list = []
         self.memory_engine: MemoryEngine | None = None
         self.memory_processor: MemoryProcessor | None = None
         self.db_migration: DBMigration | None = None
@@ -156,6 +159,15 @@ class PluginInitializer:
                 return False
 
             logger.info("LivingMemory 插件开始后台初始化...")
+
+            # 0. 初始化 PromptManager（尽早初始化，供后续组件使用）
+            try:
+                from .prompts.prompt_manager import init_prompt_manager
+
+                init_prompt_manager(self.data_dir)
+            except Exception as e:
+                logger.warning(f"PromptManager 初始化失败（不影响核心功能）: {e}")
+
             self._initialization_attempts += 1
             try:
                 return await self._initialize_once(schedule_retry=True)
@@ -511,6 +523,15 @@ class PluginInitializer:
                 await self.graph_db.initialize()
             logger.info(f"数据库已初始化。数据目录: {self.data_dir}")
 
+            # 实例级替换 save_index：变更锁 + 线程内直写 + 防抖合并，
+            # 避免大索引整文件同步写阻塞事件循环（详见 core/faiss_async_persist.py）
+            self._index_persisters = []
+            for vec_db in (self.db, self.graph_db):
+                storage = getattr(vec_db, "embedding_storage", None)
+                persister = install_async_persist(storage)
+                if persister is not None:
+                    self._index_persisters.append(persister)
+
             # 检查并执行数据库迁移
             if self.config_manager.get("migration_settings.auto_migrate", True):
                 await self._check_and_migrate_database()
@@ -726,8 +747,21 @@ class PluginInitializer:
             self._initialization_error = str(e)
             raise InitializationError(f"初始化失败: {e}") from e
 
+    async def shutdown_index_persisters(self) -> None:
+        """落盘并停止所有索引异步落盘器（terminate / 重新初始化前调用，幂等）。"""
+        persisters = getattr(self, "_index_persisters", None) or []
+        self._index_persisters = []
+        for persister in persisters:
+            try:
+                await persister.aclose()
+            except Exception:
+                logger.warning("关闭索引异步落盘器失败", exc_info=True)
+
     async def _teardown_partial_initialization(self) -> None:
         """Release every component created by an initialization attempt."""
+        # 先落盘索引未写变更，再关闭各存储组件
+        await self.shutdown_index_persisters()
+
         decay_scheduler = self.decay_scheduler
         self.decay_scheduler = None
         if decay_scheduler is not None:

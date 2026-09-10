@@ -91,7 +91,7 @@ elif _version_lt(_CURRENT_ASTRBOT_VERSION, _MIN_ASTRBOT_VERSION):
     "LivingMemory",
     "灵犀",
     "An intelligent long-term memory plugin with a dynamic lifecycle for AstrBot.",
-    "2.7.0-gd.3",
+    "2.7.0-gd.4",
     "https://github.com/gongzhudeng/astrbot_plugin_livingmemory",
 )
 class LivingMemoryPlugin(Star):
@@ -651,6 +651,8 @@ class LivingMemoryPlugin(Star):
                 await self.initializer.conversation_manager.store.close()
             if self.initializer.memory_engine:
                 await self.initializer.memory_engine.close()
+            # 关闭 FaissVecDB 之前，先把索引的未落盘变更写掉
+            await self.initializer.shutdown_index_persisters()
             if self.initializer.db:
                 await self.initializer.db.close()
 

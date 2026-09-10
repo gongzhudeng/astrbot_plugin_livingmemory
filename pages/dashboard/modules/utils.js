@@ -29,10 +29,46 @@ export function getDetailText(detail) {
  * @param {string} text - 原始文本
  * @returns {string} 转义后的 HTML 安全文本
  */
+// 全量转义映射：引号必须转义，否则 value="..."、title="..." 等属性上下文
+// 可被注入（memory_type 等字段是用户/LLM 自由文本）
+const ESC_MAP = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+
 export function esc(text) {
-  const div = document.createElement("div");
-  div.textContent = String(text);
-  return div.innerHTML;
+  return String(text).replace(/[&<>"']/g, (ch) => ESC_MAP[ch]);
+}
+
+let discardRequest;
+
+/**
+ * 未保存修改确认对话框。
+ * 优先使用 index.html 中的 <dialog id="discard-dialog">；
+ * 元素缺失时兜底 window.confirm，保证调用方逻辑不中断。
+ * @returns {Promise<boolean>} 是否放弃修改
+ */
+export function confirmDiscardChanges() {
+  const dialog = document.getElementById("discard-dialog");
+  if (!dialog || typeof dialog.showModal !== "function") {
+    return Promise.resolve(window.confirm(window.t("flow.unsavedMessage")));
+  }
+  if (discardRequest) {
+    // Native close events are queued; a new action after dismissal needs a
+    // fresh decision, rather than inheriting the previous cancelled result.
+    return dialog.open ? discardRequest : discardRequest.then(() => confirmDiscardChanges());
+  }
+  discardRequest = new Promise((resolve) => {
+    dialog.returnValue = "cancel";
+    dialog.addEventListener(
+      "close",
+      () => {
+        const discarded = dialog.returnValue === "discard";
+        discardRequest = null;
+        resolve(discarded);
+      },
+      { once: true }
+    );
+    dialog.showModal();
+  });
+  return discardRequest;
 }
 
 /**

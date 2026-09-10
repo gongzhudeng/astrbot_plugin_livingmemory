@@ -67,7 +67,9 @@ export class ApiClient {
   async request(path, options = {}) {
     const method = options.method || "GET";
     const body = options.body;
-    const retries = options.retries || 2;
+    // POST 默认不重试：带副作用的请求（如更新记忆会生成新 ID）重试会导致重复写入
+    const defaultRetries = method === "GET" ? 2 : 0;
+    const retries = options.retries ?? defaultRetries;
 
     if (!this.bridge) {
       throw new Error(window.t ? window.t("bridge.error") : "Bridge not available");
@@ -140,9 +142,12 @@ export class ApiClient {
    * POST 请求
    * @param {string} path - API 路径
    * @param {Object} body - 请求体
+   * @param {Object} options - 请求选项（可传 { retries: n } 覆盖默认不重试）
    * @returns {Promise<any>} 响应数据
    */
-  async post(path, body = {}) {
-    return this.unwrapResponse(await this.request(path, { method: "POST", body }));
+  async post(path, body = {}, options = {}) {
+    return this.unwrapResponse(
+      await this.request(path, { method: "POST", body, ...options })
+    );
   }
 }

@@ -845,6 +845,17 @@ class IndexValidator:
             }
 
         if index_path:
+            # 排空异步落盘器：飞行中的落盘写的是换文件之前的索引对象，
+            # 若在 os.replace 之后才落地，会覆盖刚换入的重建文件。
+            # flush_now 与 os.replace 之间不得有 await，否则窗口会重新打开。
+            from ..faiss_async_persist import get_async_persister
+
+            persister = get_async_persister(embedding_storage)
+            if persister is not None:
+                try:
+                    await persister.flush_now()
+                except Exception:
+                    logger.warning("重建前落盘旧索引失败，继续重建流程", exc_info=True)
             if shadow_path and os.path.exists(shadow_path):
                 # 影子索引在重建期间已随批次持久化，完成后原子替换线上索引
                 os.replace(shadow_path, index_path)
