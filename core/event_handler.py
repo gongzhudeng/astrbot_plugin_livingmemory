@@ -99,6 +99,41 @@ class EventHandler:
         )
         self.context._livingmemory_get_daily_context = self.get_daily_context
         self.context._livingmemory_get_attention_history = self.get_attention_history
+        self.context._livingmemory_search_memories = self.search_memories_for
+
+    async def search_memories_for(
+        self,
+        query: str,
+        k: int = 5,
+        session_id: str = "",
+    ) -> list[dict[str, str]]:
+        """Expose a bounded read-only memory search to trusted sibling plugins."""
+        try:
+            results = await self.memory_engine.search_memories(
+                str(query or ""),
+                k=max(1, min(12, int(k))),
+                session_id=str(session_id or "") or None,
+            )
+        except Exception as exc:
+            logger.warning(f"[LivingMemory] sibling memory search failed: {exc}")
+            return []
+        bounded: list[dict[str, str]] = []
+        for result in list(results or [])[:12]:
+            content = str(getattr(result, "content", "") or "").strip()
+            if not content:
+                continue
+            metadata = getattr(result, "metadata", {}) or {}
+            bounded.append(
+                {
+                    "text": content[:400],
+                    "time": str(
+                        metadata.get("created_at", "")
+                        if isinstance(metadata, dict)
+                        else ""
+                    ),
+                }
+            )
+        return bounded
 
     async def get_attention_history(
         self,
