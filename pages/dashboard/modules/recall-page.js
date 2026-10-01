@@ -72,12 +72,27 @@ export class RecallPage {
       this.renderResults(data, elapsed);
     } catch (e) {
       this.showToast(e.message || window.t("recall.fail"), true);
-      document.getElementById("recall-results").innerHTML = "";
-      document.getElementById("recall-stats").classList.add("hidden");
+      this.renderEmptyState();
       this.state._recallCache = null;
     } finally {
       if (searchBtn) searchBtn.disabled = false;
     }
+  }
+
+  /**
+   * 渲染空态引导（未搜索 / 出错后）
+   */
+  renderEmptyState() {
+    const resultsEl = document.getElementById("recall-results");
+    if (!resultsEl) return;
+    const statsEl = document.getElementById("recall-stats");
+    if (statsEl) statsEl.classList.add("hidden");
+    resultsEl.innerHTML =
+      '<div class="recall-empty">' +
+      '<svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/><path d="M8 11h6"/><path d="M11 8v6"/></svg>' +
+      '<div class="recall-empty-title">' + esc(window.t("recall.emptyTitle")) + '</div>' +
+      '<div class="recall-empty-sub">' + esc(window.t("recall.emptySub")) + '</div>' +
+      '</div>';
   }
 
   /**

@@ -20,6 +20,7 @@ from .page_api_modules import (
     PromptHandler,
     RecallHandler,
     StatsHandler,
+    UiPrefHandler,
 )
 
 PLUGIN_NAME = "astrbot_plugin_livingmemory"
@@ -43,8 +44,9 @@ class PluginPageApi:
         self.prompt_handler = PromptHandler(self.utils)
         self.consolidation_handler = ConsolidationHandler(self.utils)
 
-        # BackupHandler 需要 data_dir，延迟初始化
+        # BackupHandler / UiPrefHandler 需要 data_dir，延迟初始化
         self._backup_handler = None
+        self._ui_pref_handler = None
 
     @property
     def backup_handler(self) -> BackupHandler:
@@ -55,6 +57,16 @@ class PluginPageApi:
             )
             self._backup_handler = BackupHandler(self.utils, data_dir)
         return self._backup_handler
+
+    @property
+    def ui_pref_handler(self) -> UiPrefHandler:
+        """延迟初始化 UiPrefHandler"""
+        if self._ui_pref_handler is None:
+            data_dir = (
+                self.plugin.initializer.data_dir if self.plugin.initializer else ""
+            )
+            self._ui_pref_handler = UiPrefHandler(self.utils, data_dir)
+        return self._ui_pref_handler
 
     def register_routes(self) -> None:
         """注册官方插件页面所需的原生 API。"""
@@ -160,6 +172,18 @@ class PluginPageApi:
             self.run_consolidation,
             ["POST"],
             "LivingMemory Page run consolidation",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/ui_pref",
+            self.get_ui_pref,
+            ["GET"],
+            "LivingMemory Page get ui pref",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/ui_pref/update",
+            self.update_ui_pref,
+            ["POST"],
+            "LivingMemory Page update ui pref",
         )
 
     # ==================== 路由处理方法 ====================
@@ -270,6 +294,16 @@ class PluginPageApi:
     async def list_backups(self):
         """列出所有版本备份及其元数据"""
         return await self.backup_handler.list_backups()
+
+    # ---- UI 偏好路由（主题模式持久化，沙箱 iframe 里 localStorage 不可用） ----
+
+    async def get_ui_pref(self):
+        """读取 UI 偏好"""
+        return await self.ui_pref_handler.get_ui_pref()
+
+    async def update_ui_pref(self):
+        """更新 UI 偏好"""
+        return await self.ui_pref_handler.update_ui_pref()
 
     # ==================== 辅助方法 ====================
 

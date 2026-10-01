@@ -36,13 +36,35 @@
     "language.current.ru": { zh: "俄文", en: "Russian", ru: "Русский" },
     "language.toast":     { zh: "语言：{0}", en: "Language: {0}", ru: "Язык: {0}" },
 
-    /* ---- Navigation ---- */
-    "nav.memory":         { zh: "记忆管理", en: "Memory", ru: "Память" },
-    "nav.graph":          { zh: "知识图谱", en: "Knowledge Graph", ru: "Граф знаний" },
-    "nav.recallTest":     { zh: "召回测试", en: "Recall Test", ru: "Тест поиска" },
-    "nav.system":         { zh: "系统概览", en: "System", ru: "Система" },
-    "nav.recall":         { zh: "召回测试", en: "Recall Test", ru: "Тест поиска" },
-    "nav.prompts":        { zh: "提示词管理", en: "Prompts", ru: "Промпты" },
+    /* ---- Navigation（窄图标栏用短标签，对齐参考设计） ---- */
+    "nav.memory":         { zh: "记忆", en: "Memory", ru: "Память" },
+    "nav.graph":          { zh: "图谱", en: "Graph", ru: "Граф" },
+    "nav.recallTest":     { zh: "召回", en: "Recall", ru: "Поиск" },
+    "nav.system":         { zh: "系统", en: "System", ru: "Система" },
+    "nav.recall":         { zh: "召回", en: "Recall", ru: "Поиск" },
+    "nav.prompts":        { zh: "提示词", en: "Prompts", ru: "Промпты" },
+    "nav.timeline":       { zh: "时间轴", en: "Timeline", ru: "Лента" },
+
+    /* ---- Theme modes ---- */
+    "theme.menu":         { zh: "主题", en: "Theme", ru: "Тема" },
+    "theme.mode.auto":    { zh: "自动", en: "Auto", ru: "Авто" },
+    "theme.mode.light":   { zh: "白天", en: "Light", ru: "Светлая" },
+    "theme.mode.dark":    { zh: "黑夜", en: "Dark", ru: "Тёмная" },
+    "theme.autoToast":    { zh: "已切换为自动昼夜（7:00–19:00 白天）", en: "Auto day/night enabled (light 7:00–19:00)", ru: "Авто-режим включён (свет 7:00–19:00)" },
+    "theme.lightToast":   { zh: "已切换为白天 · 晨雾", en: "Switched to Light · Morning Mist", ru: "Включена светлая тема" },
+    "theme.darkToast":    { zh: "已切换为黑夜 · 星夜", en: "Switched to Dark · Starry Night", ru: "Включена тёмная тема" },
+
+    /* ---- Timeline ---- */
+    "timeline.total":     { zh: "总记忆", en: "Total", ru: "Всего" },
+    "timeline.graphNodes":{ zh: "图节点", en: "Graph Nodes", ru: "Узлов графа" },
+    "timeline.weekNew":   { zh: "本周新增", en: "This Week", ru: "За неделю" },
+    "timeline.loaded":    { zh: "已载入 {0} 条", en: "{0} loaded", ru: "Загружено {0}" },
+    "timeline.loadMore":  { zh: "加载更多", en: "Load more", ru: "Загрузить ещё" },
+    "timeline.noMore":    { zh: "已经到底啦", en: "You've reached the end", ru: "Это всё" },
+    "timeline.today":     { zh: "今天", en: "Today", ru: "Сегодня" },
+    "timeline.yesterday": { zh: "昨天", en: "Yesterday", ru: "Вчера" },
+    "timeline.empty":     { zh: "时间线还没有记忆，去聊聊创造一些回忆吧", en: "No memories on the timeline yet", ru: "Лента пока пуста" },
+    "timeline.loadFail":  { zh: "时间轴加载失败", en: "Failed to load timeline", ru: "Ошибка загрузки ленты" },
 
     /* ---- Nuke ---- */
     "nuke.cancel":        { zh: "取消核爆", en: "Cancel Nuke", ru: "Отменить сброс" },
@@ -259,6 +281,10 @@
     "graph.disabledRetrieval":{ zh: "点击\"最近概览\"加载图谱，或直接输入检索词。", en: "Click Recent Overview to load graph, or enter a search term.", ru: "Нажмите Обзор для загрузки графа или введите запрос." },
     "graph.disabledInspector":{ zh: "请选择节点或记忆查看详细信息。", en: "Select a node or memory to view details.", ru: "Выберите узел или память для просмотра." },
     "graph.disabledCanvas":{ zh: "当前实例尚未启用图记忆。", en: "Graph memory is not yet enabled.", ru: "Граф памяти ещё не включён." },
+    "graph.fragments":    { zh: "记忆碎片", en: "Fragments", ru: "Фрагменты" },
+    "graph.fragmentsOn":  { zh: "记忆碎片 开", en: "Fragments On", ru: "Фрагменты вкл" },
+    "graph.fragmentsOff": { zh: "记忆碎片 关", en: "Fragments Off", ru: "Фрагменты выкл" },
+    "graph.fragmentsTip": { zh: "在星图上飘出记忆里的短句（来自真实记忆内容）", en: "Drift short snippets from real memories across the starmap", ru: "Показывать обрывки памятей поверх карты" },
 
     /* ---- Graph Error ---- */
     "graph.errorBadge":   { zh: "图谱加载失败", en: "Graph Load Failed", ru: "Ошибка загрузки графа" },
@@ -327,7 +353,10 @@
     "recall.title":       { zh: "记忆召回功能测试", en: "Memory Recall Test", ru: "Тест поиска памяти" },
     "recall.subtitle":    { zh: "输入查询语句，测试混合检索引擎的召回能力", en: "Enter a query to test the hybrid retrieval engine", ru: "Введите запрос для теста гибридного поиска" },
     "recall.queryLabel":  { zh: "查询内容", en: "Query", ru: "Запрос" },
-    "recall.queryPh":     { zh: "输入你的查询语句，系统将使用混合检索（BM25+向量相似度）进行召回", en: "Enter your query. The system uses hybrid retrieval (BM25 + vector similarity).", ru: "Введите запрос. Система использует гибридный поиск (BM25 + векторы)." },
+    "recall.queryPh":     { zh: "输入想召回的内容，比如：我上周聊过什么？", en: "What do you want to recall?", ru: "Что вы хотите вспомнить?" },
+    "recall.queryHint":   { zh: "Ctrl + Enter 快速执行 · 混合检索：BM25 关键词 + 向量相似度", en: "Ctrl + Enter to run · Hybrid retrieval: BM25 keywords + vector similarity", ru: "Ctrl + Enter — запуск · Гибридный поиск: BM25 + векторы" },
+    "recall.emptyTitle":  { zh: "输入一句话，看看能召回哪些记忆", en: "Type a query and see which memories come back", ru: "Введите запрос и посмотрите, что найдётся" },
+    "recall.emptySub":    { zh: "结果会按相似度排序显示在这里，点击任意一条可查看详情", en: "Results are ranked by similarity. Click one to view details.", ru: "Результаты сортируются по схожести. Нажмите для деталей." },
     "recall.countLabel":  { zh: "返回数量", en: "Result Count", ru: "Кол-во результатов" },
     "recall.kLabel":      { zh: "结果数 (k)", en: "Results (k)", ru: "Результаты (k)" },
     "recall.countPh":     { zh: "返回的记忆数量", en: "Number of memories to return", ru: "Количество возвращаемых памятей" },
@@ -425,6 +454,10 @@
     "detail.editHistory": { zh: "编辑历史", en: "Edit History", ru: "История изменений" },
     "detail.editBtn":     { zh: "编辑", en: "Edit", ru: "Редактировать" },
     "detail.deleteBtn":   { zh: "删除", en: "Delete", ru: "Удалить" },
+    "detail.archiveBtn":  { zh: "归档", en: "Archive", ru: "В архив" },
+    "detail.locateBtn":   { zh: "图谱定位", en: "Locate in Graph", ru: "Найти в графе" },
+    "detail.archivedOk":  { zh: "已归档记忆 #{0}", en: "Memory #{0} archived", ru: "Память #{0} в архиве" },
+    "detail.archiveFail": { zh: "归档失败", en: "Archive failed", ru: "Ошибка архивации" },
     "detail.saveBtn":     { zh: "保存修改", en: "Save Changes", ru: "Сохранить" },
     "detail.cancelBtn":   { zh: "取消", en: "Cancel", ru: "Отмена" },
     "detail.memoryTitle": { zh: "记忆 #{0}", en: "Memory #{0}", ru: "Память #{0}" },

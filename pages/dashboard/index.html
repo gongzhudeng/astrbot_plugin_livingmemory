@@ -11,7 +11,10 @@
     <div id="app">
       <!-- Sidebar -->
       <aside class="sidebar">
-        <div class="sidebar-brand">LivingMemory</div>
+        <div class="sidebar-brand">
+          <span class="brand-logo" role="img" aria-label="LivingMemory"></span>
+          <span>LivingMemory</span>
+        </div>
         <nav class="sidebar-nav">
           <button class="nav-item active" data-page="graph">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -19,6 +22,12 @@
               <line x1="8.5" y1="9.5" x2="17" y2="6"/><line x1="8.5" y1="14.5" x2="17" y2="18"/><line x1="15" y1="7" x2="6.5" y2="11.5"/>
             </svg>
             <span data-i18n="nav.graph">Knowledge Graph</span>
+          </button>
+          <button class="nav-item" data-page="timeline">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>
+            </svg>
+            <span data-i18n="nav.timeline">Timeline</span>
           </button>
           <button class="nav-item" data-page="memory">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -48,15 +57,22 @@
         </nav>
         <div class="sidebar-divider"></div>
         <div class="sidebar-footer">
-          <button class="nav-item" id="theme-toggle">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" id="theme-icon-dark">
-              <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>
-            </svg>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" id="theme-icon-light" class="hidden">
-              <circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2m-6.93-15.07 1.41 1.41m11.04 11.04 1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>
-            </svg>
-            <span data-i18n="header.theme">Theme</span>
-          </button>
+          <details class="lang-menu" id="theme-menu">
+            <summary class="nav-item" id="theme-toggle">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" id="theme-icon-dark">
+                <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>
+              </svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" id="theme-icon-light" class="hidden">
+                <circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2m-6.93-15.07 1.41 1.41m11.04 11.04 1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>
+              </svg>
+              <span data-i18n="theme.menu">Theme</span>
+            </summary>
+            <div class="lang-options">
+              <button type="button" class="lang-option" data-mode="auto" data-i18n="theme.mode.auto">自动</button>
+              <button type="button" class="lang-option" data-mode="light" data-i18n="theme.mode.light">白天</button>
+              <button type="button" class="lang-option" data-mode="dark" data-i18n="theme.mode.dark">黑夜</button>
+            </div>
+          </details>
           <details class="lang-menu" id="lang-menu">
           <summary class="nav-item" id="lang-toggle">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -98,6 +114,7 @@
             <div class="graph-canvas-container" style="flex:1">
               <div class="graph-canvas-state" id="graph-canvas-state" data-i18n="graph.canvasDefault">Loading graph overview...</div>
               <div id="graph-canvas" class="graph-canvas"></div>
+              <button type="button" class="graph-fragments-btn on" id="graph-fragments-btn" data-i18n="graph.fragmentsOn">记忆碎片 开</button>
             </div>
             <div class="graph-legend" id="graph-legend"></div>
             <div class="graph-toolbar">
@@ -111,6 +128,25 @@
                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v4m0 12v4m-6.93-15.07 2.83 2.83m8.48 8.48 2.83 2.83M2 12h4m12 0h4M4.93 19.07l2.83-2.83m8.48-8.48 2.83-2.83"/></svg>
                 <span data-i18n="graph.focusBtn">Focus</span>
               </button>
+            </div>
+          </div>
+        </section>
+
+        <!-- Page: Timeline -->
+        <section class="page" id="page-timeline">
+          <header class="page-header">
+            <span class="page-title" data-i18n="nav.timeline">Timeline</span>
+          </header>
+          <div class="page-body">
+            <div class="stat-pills" id="tl-stats">
+              <div class="stat-pill"><div class="stat-pill-value" id="tls-total">--</div><div class="stat-pill-label" data-i18n="timeline.total">Total</div></div>
+              <div class="stat-pill"><div class="stat-pill-value" id="tls-nodes">--</div><div class="stat-pill-label" data-i18n="timeline.graphNodes">Graph Nodes</div></div>
+              <div class="stat-pill"><div class="stat-pill-value" id="tls-week">--</div><div class="stat-pill-label" data-i18n="timeline.weekNew">This Week</div></div>
+              <div class="stat-pill"><div class="stat-pill-value" id="tls-loaded">--</div><div class="stat-pill-label" data-i18n="timeline.loaded">loaded</div></div>
+            </div>
+            <div class="timeline" id="timeline-container"></div>
+            <div class="timeline-more">
+              <button class="btn btn-secondary btn-sm" id="tl-more-btn" data-i18n="timeline.loadMore">Load more</button>
             </div>
           </div>
         </section>
@@ -192,7 +228,8 @@
           </header>
           <div class="page-body">
             <div class="recall-form-section">
-              <textarea id="recall-query" class="input textarea" rows="3" data-i18n-placeholder="recall.queryPh" placeholder="Enter a query to test the dual-route four-mode hybrid retrieval engine..."></textarea>
+              <textarea id="recall-query" class="input textarea" rows="2" data-i18n-placeholder="recall.queryPh" placeholder="输入想召回的内容，比如：我上周聊过什么？"></textarea>
+              <div class="recall-form-hint" data-i18n="recall.queryHint">Ctrl + Enter 快速执行 · 混合检索：BM25 关键词 + 向量相似度</div>
               <div class="recall-form-row">
                 <div class="recall-form-field" style="max-width:200px">
                   <label class="recall-form-label" data-i18n="recall.kLabel">Results (k)</label>
@@ -212,7 +249,13 @@
               <span id="recall-count-text">0 results</span>
               <span class="text-tertiary" id="recall-time-text"></span>
             </div>
-            <div id="recall-results"></div>
+            <div id="recall-results">
+              <div class="recall-empty">
+                <svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/><path d="M8 11h6"/><path d="M11 8v6"/></svg>
+                <div class="recall-empty-title" data-i18n="recall.emptyTitle">输入一句话，看看能召回哪些记忆</div>
+                <div class="recall-empty-sub" data-i18n="recall.emptySub">结果会按相似度排序显示在这里，点击任意一条可查看详情</div>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -252,7 +295,6 @@
                 <div class="stat-pill"><div class="stat-pill-value" id="cons-archived">--</div><div class="stat-pill-label" data-i18n="stats.archived">Archived</div></div>
               </div>
               <button class="btn btn-primary btn-sm" id="cons-run-btn" style="margin-top:12px">
-                <i data-lucide="refresh-cw" aria-hidden="true"></i>
                 <span data-i18n="system.consolidationRun">Run Now</span>
               </button>
               <span class="text-tertiary" id="cons-run-result" style="margin-left:10px;font-size:12px"></span>
@@ -304,7 +346,7 @@
       </form>
     </dialog>
 
-    <!-- Peek Panel -->
+    <!-- Reading Layer（居中阅读层，原 peek panel 改造） -->
     <div class="peek-overlay" id="peek-overlay"></div>
     <aside class="peek-panel" id="peek-panel">
       <div class="peek-header">
@@ -318,57 +360,6 @@
       </div>
       <div class="peek-body" id="peek-body"></div>
     </aside>
-
-    <!-- Edit Modal -->
-    <div class="modal-overlay" id="modal-overlay">
-      <div class="modal">
-        <div class="modal-header">
-          <div class="modal-title" data-i18n="edit.title">Edit Memory</div>
-          <button class="modal-close" id="modal-close">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
-          </button>
-        </div>
-        <div class="modal-body">
-          <div class="form-group">
-            <label class="form-label" data-i18n="edit.field">Field</label>
-            <select id="edit-field" class="select input">
-              <option value="content" data-i18n="edit.fieldContent">Content</option>
-              <option value="importance" data-i18n="edit.fieldImportance">Importance</option>
-              <option value="type" data-i18n="edit.fieldType">Type</option>
-              <option value="status" data-i18n="edit.fieldStatus">Status</option>
-            </select>
-          </div>
-          <div class="form-group" id="edit-group-content">
-            <label class="form-label" data-i18n="edit.newContent">New Content</label>
-            <textarea id="edit-value-content" class="input textarea" rows="5" data-i18n-placeholder="edit.newContentPh" placeholder="Enter new memory content"></textarea>
-          </div>
-          <div class="form-group hidden" id="edit-group-importance">
-            <label class="form-label" data-i18n="edit.newImportance">Importance (0-10)</label>
-            <input type="number" id="edit-value-importance" class="input" min="0" max="10" step="0.1" value="5" />
-          </div>
-          <div class="form-group hidden" id="edit-group-type">
-            <label class="form-label" data-i18n="edit.newType">New Type</label>
-            <input type="text" id="edit-value-type" class="input" data-i18n-placeholder="edit.typePh" placeholder="e.g. FACT, PREFERENCE, EVENT" />
-          </div>
-          <div class="form-group hidden" id="edit-group-status">
-            <label class="form-label" data-i18n="edit.newStatus">New Status</label>
-            <select id="edit-value-status" class="select input">
-              <option value="active" data-i18n="edit.statusPh">Active</option>
-              <option value="archived" data-i18n="edit.statusArchived">Archived</option>
-              <option value="deleted" data-i18n="edit.statusDeleted">Deleted</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label class="form-label" data-i18n="edit.reason">Update Reason (optional)</label>
-            <input type="text" id="edit-reason" class="input" data-i18n-placeholder="edit.reasonPh" placeholder="Reason for this update" />
-          </div>
-        </div>
-        <div class="modal-footer">
-          <button class="btn btn-secondary" id="cancel-edit" data-i18n="common.cancel">Cancel</button>
-          <button class="btn btn-primary" id="save-edit" data-i18n="common.save">Save</button>
-        </div>
-      </div>
-    </div>
 
     <!-- Toast -->
     <div class="toast" id="toast"></div>

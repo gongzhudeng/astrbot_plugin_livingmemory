@@ -7,6 +7,7 @@ import {
   ApiClient,
   PeekPanel,
   MemoryPage,
+  TimelinePage,
   RecallPage,
   SystemPage,
   PromptPage,
@@ -50,13 +51,67 @@ import {
   const api = new ApiClient();
   const peekPanel = new PeekPanel(state, api);
   const memoryPage = new MemoryPage(state, api, peekPanel);
+  const timelinePage = new TimelinePage(state, api, peekPanel);
   const recallPage = new RecallPage(state, api, peekPanel);
   const systemPage = new SystemPage(state, api);
   const promptPage = new PromptPage(state, api);
 
   /* ================================================================
-     Theme Management
+     Theme Management（三档：自动 / 白天 / 黑夜）
+     自动模式按本地时间切换，默认 7:00–19:00 为白天，
+     可用 localStorage 覆盖：lmem_theme_day_start / lmem_theme_day_end
      ================================================================ */
+  const THEME_MODE_KEY = "lmem_theme_mode";
+  const DAY_START_KEY = "lmem_theme_day_start";
+  const DAY_END_KEY = "lmem_theme_day_end";
+
+  /* 内存中的主题模式（唯一事实源）：
+     沙箱环境下 localStorage 可能写入失败，若切换后回读存储会导致
+     永远卡在 auto——所以 setThemeMode 直接更新内存变量。 */
+  let themeMode = "auto";
+
+  function loadThemeMode() {
+    try {
+      const saved = localStorage.getItem(THEME_MODE_KEY);
+      if (saved === "light" || saved === "dark" || saved === "auto") {
+        themeMode = saved;
+        return true; // 本地存储命中（普通浏览器环境）
+      }
+    } catch (e) { /* ignore */ }
+    // 插件页 iframe 是沙箱 origin（sandbox 无 allow-same-origin），
+    // localStorage 读写会抛异常 → 返回 false，由 init 从后端补拉
+    return false;
+  }
+
+  function getThemeMode() {
+    return themeMode;
+  }
+
+  function getDayWindow() {
+    let start = 7;
+    let end = 19;
+    try {
+      const s = parseInt(localStorage.getItem(DAY_START_KEY), 10);
+      const e = parseInt(localStorage.getItem(DAY_END_KEY), 10);
+      if (s >= 0 && s <= 23) start = s;
+      if (e >= 1 && e <= 24) end = e;
+    } catch (e) { /* ignore */ }
+    return { start, end };
+  }
+
+  function resolveAutoTheme() {
+    const { start, end } = getDayWindow();
+    const hour = new Date().getHours();
+    // 支持跨零点窗口（如 20-7）
+    const isDay = start <= end ? (hour >= start && hour < end) : (hour >= start || hour < end);
+    return isDay ? "light" : "dark";
+  }
+
+  function resolveTheme() {
+    const mode = getThemeMode();
+    return mode === "auto" ? resolveAutoTheme() : mode;
+  }
+
   function applyTheme(theme) {
     document.documentElement.setAttribute("data-theme", theme);
     const darkIcon = document.getElementById("theme-icon-dark");
@@ -67,35 +122,41 @@ import {
     }
   }
 
-  function getInitialTheme(context) {
-    if (context && typeof context.isDark === "boolean") {
-      return context.isDark ? "dark" : "light";
-    }
-
-    try {
-      const saved = localStorage.getItem("lmem_theme");
-      if (saved === "dark" || saved === "light") {
-        return saved;
-      }
-    } catch (e) {
-      console.warn("[LM] Failed to read theme from localStorage:", e);
-    }
-
-    return "light";
+  function applyThemeMode() {
+    applyTheme(resolveTheme());
+    updateThemeMenu();
   }
 
-  function toggleTheme() {
-    const current = document.documentElement.getAttribute("data-theme") || "light";
-    const next = current === "light" ? "dark" : "light";
-
+  /* 沙箱 iframe 里 localStorage 不可用：经桥接存到插件后端持久化
+     （本地存储可用时双写，下次加载本地优先） */
+  function persistThemeMode(mode) {
     try {
-      localStorage.setItem("lmem_theme", next);
+      localStorage.setItem(THEME_MODE_KEY, mode);
     } catch (e) {
-      console.warn("[LM] Failed to save theme to localStorage:", e);
+      console.warn("[LM] localStorage unavailable, persist via backend:", e.message);
     }
+    if (api && typeof api.post === "function") {
+      api.post("ui_pref/update", { theme_mode: mode }).catch(() => {});
+    }
+  }
 
-    applyTheme(next);
-    showToast(window.t(next === "dark" ? "theme.darkToast" : "theme.lightToast"));
+  function setThemeMode(mode) {
+    themeMode = mode;
+    persistThemeMode(mode);
+    applyTheme(mode === "auto" ? resolveAutoTheme() : mode);
+    updateThemeMenu();
+    const toastKey = mode === "auto" ? "theme.autoToast"
+      : mode === "light" ? "theme.lightToast" : "theme.darkToast";
+    showToast(window.t(toastKey));
+  }
+
+  function updateThemeMenu() {
+    const mode = getThemeMode();
+    document.querySelectorAll("#theme-menu .lang-option[data-mode]").forEach(option => {
+      const active = option.dataset.mode === mode;
+      option.classList.toggle("active", active);
+      option.setAttribute("aria-current", active ? "true" : "false");
+    });
   }
 
   /* ================================================================
@@ -133,6 +194,7 @@ import {
       fetchGraphStats();
       if (window.ensureGraphScene) window.ensureGraphScene();
     }
+    if (name === "timeline") timelinePage.fetch();
     if (name === "memory") memoryPage.fetch();
     if (name === "recall") { /* 召回页面按需加载 */ }
     if (name === "system") systemPage.fetch();
@@ -158,7 +220,21 @@ import {
       });
     });
 
-    document.getElementById("theme-toggle").addEventListener("click", toggleTheme);
+    // 主题三档菜单
+    const themeMenu = document.getElementById("theme-menu");
+    document.querySelectorAll("#theme-menu .lang-option[data-mode]").forEach(option => {
+      option.addEventListener("click", () => {
+        const mode = option.dataset.mode;
+        if (!mode) return;
+        setThemeMode(mode);
+        if (themeMenu) themeMenu.removeAttribute("open");
+      });
+    });
+    if (themeMenu) {
+      themeMenu.addEventListener("toggle", (e) => {
+        if (e.newState === "open") updateThemeMenu();
+      });
+    }
 
     const langMenu = document.getElementById("lang-menu");
     document.querySelectorAll(".lang-option[data-lang]").forEach(option => {
@@ -207,10 +283,14 @@ import {
 
   function refreshDynamicI18n() {
     updateLanguageMenu();
+    updateThemeMenu();
 
     if (state.page === "memory") {
       memoryPage.renderVirtual();
       memoryPage.updatePagination();
+    }
+    if (state.page === "timeline" && timelinePage.hasData()) {
+      timelinePage.render();
     }
     if (state.page === "recall" && state._recallCache) {
       recallPage.renderResults(state._recallCache.data, state._recallCache.elapsed);
@@ -257,26 +337,58 @@ import {
 
     if (api.bridge && typeof api.bridge.onContext === "function") {
       api.bridge.onContext((ctx) => {
-        if (ctx && typeof ctx.isDark === "boolean") {
-          const newTheme = ctx.isDark ? "dark" : "light";
-          const currentTheme = document.documentElement.getAttribute("data-theme") || "light";
-          if (newTheme !== currentTheme) {
-            applyTheme(newTheme);
-          }
-        }
-
         if (ctx && ctx.locale) {
           updateLanguageMenu();
         }
       });
     }
 
-    const initialTheme = getInitialTheme(context);
-    applyTheme(initialTheme);
+    // 主题：三档模式（默认自动昼夜），仪表盘推送的 isDark 不再直接覆盖用户偏好
+    const hasLocalTheme = loadThemeMode();
+    applyThemeMode();
+
+    // 主题守卫：仪表盘侧 plugin_page_bridge.js 收到 context 推送（含 isDark）
+    // 时会把 data-theme 直接强写成仪表盘自身的明暗，覆盖页面设置的主题。
+    // 监听属性变化，一旦被外部改掉就立刻改回用户选择的主题；
+    // 页面自身 applyTheme 写入的值与 resolveTheme() 一致，不会形成循环。
+    if (typeof MutationObserver === "function") {
+      new MutationObserver(() => {
+        const current = document.documentElement.getAttribute("data-theme");
+        if (current && current !== resolveTheme()) {
+          applyTheme(resolveTheme());
+        }
+      }).observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ["data-theme"],
+      });
+    }
+
+    // 沙箱 iframe 里 localStorage 读不到已存模式：从后端补拉（本地命中则本地优先）
+    if (!hasLocalTheme && typeof api.get === "function") {
+      api.get("ui_pref").then((data) => {
+        const saved = data && data.theme_mode;
+        if (
+          (saved === "light" || saved === "dark" || saved === "auto") &&
+          saved !== themeMode
+        ) {
+          themeMode = saved;
+          applyThemeMode();
+        }
+      }).catch(() => { /* 后端不可用时保持默认 auto */ });
+    }
+
+    // 自动模式下每 5 分钟复查一次（页面久开时跨过昼夜分界自动切换）
+    setInterval(() => {
+      if (getThemeMode() === "auto") applyTheme(resolveTheme());
+    }, 5 * 60 * 1000);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden && getThemeMode() === "auto") applyTheme(resolveTheme());
+    });
 
     initSidebar();
 
     memoryPage.initEventListeners();
+    timelinePage.initEventListeners();
     recallPage.initEventListeners();
     systemPage.initEventListeners();
 
@@ -309,8 +421,12 @@ import {
   window.lmOpenPeekNode = (nodeData) => peekPanel.renderNode(nodeData);
   window.lmOpenPeekMemory = (memory) => peekPanel.renderMemory(memory);
   window.lmClosePeek = () => peekPanel.close();
+  window.lmSwitchPage = (name) => switchPage(name);
   window.lmFetchGraphStats = fetchGraphStats;
-  window.lmRefreshMemories = () => memoryPage.fetch();
+  window.lmRefreshMemories = async () => {
+    await memoryPage.fetch();
+    timelinePage.invalidate();
+  };
   window.lmEsc = esc;
   window.lmStatusPill = statusPill;
   window.lmNodeBadge = nodeBadge;

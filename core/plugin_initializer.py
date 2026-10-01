@@ -84,6 +84,33 @@ def _sanitize_path(path: str) -> str:
     return "".join(parts)
 
 
+def _sync_webui_logo() -> None:
+    """把插件根目录的 logo.png 同步到 WebUI 页面目录。
+
+    AstrBot 页面资源服务禁止 ``../`` 跨目录引用，页面静态文件只能放在
+    pages/dashboard/ 内；WebUI 侧边栏品牌图标引用的是 pages/dashboard/logo.png。
+    这里在插件每次初始化时与根目录 logo.png 做 mtime+size 比对，不一致才复制，
+    从而让 WebUI 图标始终跟随根目录的图标文件（改了根目录图标后重载插件即生效）。
+    """
+    try:
+        plugin_root = Path(__file__).resolve().parent.parent
+        src = plugin_root / "logo.png"
+        dst = plugin_root / "pages" / "dashboard" / "logo.png"
+        if not src.is_file():
+            return
+        if dst.is_file():
+            s_stat, d_stat = src.stat(), dst.stat()
+            if (
+                s_stat.st_size == d_stat.st_size
+                and int(s_stat.st_mtime) == int(d_stat.st_mtime)
+            ):
+                return
+        shutil.copy2(src, dst)
+        logger.info("已同步插件图标 logo.png 到 WebUI 页面目录")
+    except Exception as e:  # 图标同步失败不影响任何核心功能
+        logger.warning(f"同步插件图标失败（不影响核心功能）: {e}")
+
+
 class PluginInitializer:
     """插件初始化器"""
 
@@ -159,6 +186,9 @@ class PluginInitializer:
                 return False
 
             logger.info("LivingMemory 插件开始后台初始化...")
+
+            # 同步插件图标到 WebUI 页面目录（mtime/大小变化才复制，失败不影响核心功能）
+            _sync_webui_logo()
 
             # 0. 初始化 PromptManager（尽早初始化，供后续组件使用）
             try:

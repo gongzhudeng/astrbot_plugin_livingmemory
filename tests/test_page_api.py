@@ -1148,11 +1148,11 @@ class TestEnsurePluginReady:
 
 
 class TestRouteRegistration:
-    def test_registers_all_ten_routes(self):
+    def test_registers_all_routes(self):
         plugin = FakePlugin()
         api = PluginPageApi(plugin)
         api.register_routes()
-        assert len(plugin._api_routes) == 10
+        assert len(plugin._api_routes) == 19
 
         paths = {route for route, _, _, _ in plugin._api_routes}
         prefix = PAGE_API_PREFIX
@@ -1164,6 +1164,65 @@ class TestRouteRegistration:
         assert f"{prefix}/graph/overview" in paths
         assert f"{prefix}/graph/query" in paths
         assert f"{prefix}/backups" in paths
+        assert f"{prefix}/ui_pref" in paths
+        assert f"{prefix}/ui_pref/update" in paths
 
     def test_route_prefix_contains_plugin_name(self):
         assert PLUGIN_NAME in PAGE_API_PREFIX
+
+
+# ---------------------------------------------------------------------------
+# UiPrefHandler（主题模式等 UI 偏好持久化）
+# ---------------------------------------------------------------------------
+
+
+class _FakeQuartRequest:
+    def __init__(self, payload):
+        self._payload = payload
+
+    async def get_json(self, silent=True):
+        return self._payload
+
+
+class TestUiPrefHandler:
+    @pytest.mark.asyncio
+    async def test_get_empty(self, tmp_path):
+        from astrbot_plugin_livingmemory.core.page_api_modules.ui_pref_handler import (
+            UiPrefHandler,
+        )
+
+        handler = UiPrefHandler(SimpleNamespace(ok=lambda d: {"status": "ok", "data": d}), str(tmp_path))
+        result = await handler.get_ui_pref()
+        assert result == {"status": "ok", "data": {"theme_mode": ""}}
+
+    @pytest.mark.asyncio
+    async def test_update_roundtrip(self, tmp_path, monkeypatch):
+        import astrbot_plugin_livingmemory.core.page_api_modules.ui_pref_handler as mod
+        from astrbot_plugin_livingmemory.core.page_api_modules.ui_pref_handler import (
+            UiPrefHandler,
+        )
+
+        monkeypatch.setattr(mod, "request", _FakeQuartRequest({"theme_mode": "dark"}))
+        ok = lambda d: {"status": "ok", "data": d}
+        handler = UiPrefHandler(SimpleNamespace(ok=ok, error=lambda m: {"status": "error", "message": m}), str(tmp_path))
+
+        result = await handler.update_ui_pref()
+        assert result == {"status": "ok", "data": {"theme_mode": "dark"}}
+
+        result = await handler.get_ui_pref()
+        assert result["data"]["theme_mode"] == "dark"
+
+    @pytest.mark.asyncio
+    async def test_update_rejects_invalid_mode(self, tmp_path, monkeypatch):
+        import astrbot_plugin_livingmemory.core.page_api_modules.ui_pref_handler as mod
+        from astrbot_plugin_livingmemory.core.page_api_modules.ui_pref_handler import (
+            UiPrefHandler,
+        )
+
+        monkeypatch.setattr(mod, "request", _FakeQuartRequest({"theme_mode": "blue"}))
+        handler = UiPrefHandler(
+            SimpleNamespace(ok=lambda d: {"status": "ok", "data": d}, error=lambda m: {"status": "error", "message": m}),
+            str(tmp_path),
+        )
+        result = await handler.update_ui_pref()
+        assert result["status"] == "error"

@@ -8,6 +8,8 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
+import aiosqlite
+
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.provider import LLMResponse, ProviderRequest
@@ -26,6 +28,7 @@ from .event_handler_modules import (
 from .managers.conversation_manager import ConversationManager
 from .managers.memory_engine import MemoryEngine
 from .processors.memory_processor import MemoryProcessor
+from ..storage.sqlite_utils import sqlite_connection
 from .utils import get_persona_id as get_persona_id
 from .utils.injection_adapter import InjectionAdapter
 
@@ -100,6 +103,7 @@ class EventHandler:
         self.context._livingmemory_get_daily_context = self.get_daily_context
         self.context._livingmemory_get_attention_history = self.get_attention_history
         self.context._livingmemory_search_memories = self.search_memories_for
+        self.context._livingmemory_get_recent_memories = self.get_recent_memories
 
     async def search_memories_for(
         self,
@@ -134,6 +138,85 @@ class EventHandler:
                 }
             )
         return bounded
+
+    async def get_recent_memories(
+        self,
+        session_id: str,
+        since: str = "",
+        limit: int = 3,
+    ) -> list[dict[str, str]]:
+        """Expose recently created memories to trusted sibling plugins.
+
+        Returns at most ``limit`` active memories of one session whose
+        canonical create time (``metadata.create_time``, falling back to the
+        ``created_at`` column) is at or after ``since``, newest first.
+        ``since`` accepts ISO datetime (naive = local time) or unix seconds.
+        """
+        db_path = getattr(self.memory_engine, "db_path", None)
+        cutoff = self._parse_since_value(since)
+        if not db_path or cutoff is None:
+            return []
+
+        capped = max(1, min(10, int(limit)))
+        created_expr = (
+            "COALESCE(CAST(json_extract(metadata, '$.create_time') AS REAL),"
+            " CAST(created_at AS REAL), 0)"
+        )
+        try:
+            async with sqlite_connection(db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(
+                    f"""
+                    SELECT text, {created_expr} AS created_num
+                    FROM documents
+                    WHERE json_extract(metadata, '$.session_id') = ?
+                      AND COALESCE(json_extract(metadata, '$.status'), 'active') = 'active'
+                      AND {created_expr} >= ?
+                    ORDER BY {created_expr} DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (str(session_id or ""), float(cutoff), capped),
+                )
+                rows = await cursor.fetchall()
+        except Exception as exc:
+            logger.warning(f"[LivingMemory] sibling recent-memory query failed: {exc}")
+            return []
+
+        results: list[dict[str, str]] = []
+        for row in rows:
+            text = str(row["text"] or "").strip()
+            if not text:
+                continue
+            created_num = float(row["created_num"] or 0.0)
+            results.append(
+                {
+                    "text": text[:400],
+                    "time": (
+                        datetime.fromtimestamp(created_num).strftime("%Y-%m-%d %H:%M")
+                        if created_num > 0
+                        else ""
+                    ),
+                }
+            )
+        return results
+
+    @staticmethod
+    def _parse_since_value(value: str) -> float | None:
+        """Parse ``since`` as unix seconds or ISO datetime; None when invalid."""
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            pass
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone()
+        return parsed.timestamp()
 
     async def get_attention_history(
         self,

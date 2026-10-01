@@ -146,6 +146,10 @@ export class PeekPanel {
     // 操作按钮
     html += '<div class="memory-detail-actions">';
     html += '<button class="btn btn-sm btn-secondary" id="peek-edit-btn">' + window.t("detail.editBtn") + '</button>';
+    if (status !== "archived") {
+      html += '<button class="btn btn-sm btn-secondary" id="peek-archive-btn">' + window.t("detail.archiveBtn") + '</button>';
+    }
+    html += '<button class="btn btn-sm btn-secondary" id="peek-locate-btn">' + window.t("detail.locateBtn") + '</button>';
     html += '<button class="btn btn-sm btn-danger" id="peek-delete-btn">' + window.t("detail.deleteBtn") + '</button>';
     html += '</div>';
 
@@ -209,8 +213,12 @@ export class PeekPanel {
     // 绑定按钮事件
     const editBtn = document.getElementById("peek-edit-btn");
     const delBtn = document.getElementById("peek-delete-btn");
+    const archiveBtn = document.getElementById("peek-archive-btn");
+    const locateBtn = document.getElementById("peek-locate-btn");
     if (editBtn) editBtn.addEventListener("click", () => this.renderEditView(detail));
     if (delBtn) delBtn.addEventListener("click", () => this.deleteSingleMemory(parseInt(id)));
+    if (archiveBtn) archiveBtn.addEventListener("click", () => this.archiveMemory(parseInt(id)));
+    if (locateBtn) locateBtn.addEventListener("click", () => this.locateInGraph(parseInt(id)));
 
     // 加载图谱小视图
     const miniCanvas = document.getElementById("peek-mini-graph");
@@ -377,6 +385,40 @@ export class PeekPanel {
     } finally {
       if (saveBtn) saveBtn.disabled = false;
     }
+  }
+
+  /**
+   * 归档单个记忆（status → archived）
+   * @param {number} id - 记忆 ID
+   */
+  async archiveMemory(id) {
+    try {
+      await this.api.post("memories/update", {
+        memory_id: id,
+        field: "status",
+        value: "archived",
+        reason: "archived from WebUI reading layer",
+      });
+      this.showToast(window.t("detail.archivedOk", id));
+      this.close();
+
+      // 通知刷新记忆列表与时间轴
+      if (window.lmRefreshMemories) {
+        await window.lmRefreshMemories();
+      }
+    } catch (e) {
+      this.showToast(e.message || window.t("detail.archiveFail"), true);
+    }
+  }
+
+  /**
+   * 关闭阅读层并跳到图谱页定位该记忆
+   * @param {number} id - 记忆 ID
+   */
+  locateInGraph(id) {
+    this.close();
+    if (window.lmSwitchPage) window.lmSwitchPage("graph");
+    if (window.lmGotoGraphFocus) window.lmGotoGraphFocus(id);
   }
 
   /**

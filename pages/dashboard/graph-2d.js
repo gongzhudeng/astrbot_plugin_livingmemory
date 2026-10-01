@@ -8,22 +8,47 @@
 
   /* ── Configuration ─────────────────────────────────────────── */
   const CFG = {
-    NODE_RADIUS_MIN: 4,
-    NODE_RADIUS_MAX: 10,
-    NODE_RADIUS_BASE: 4,
+    /* 恒星节点：三层画法（白热内核→类型色冕→透明渐变），核心半径收紧 */
+    NODE_RADIUS_MIN: 2.6,
+    NODE_RADIUS_MAX: 6.5,
+    NODE_RADIUS_BASE: 2.6,
+    CENTER_SCALE: 1.5,
+    CENTER_MAX_RADIUS: 9.5,
     NODE_FONT_SIZE: 11,
     NODE_META_SIZE: 9,
-    EDGE_WIDTH_DEFAULT: 0.7,
-    EDGE_WIDTH_ACTIVE: 1.1,
-    EDGE_WIDTH_HIGHLIGHT: 1.7,
-    EDGE_OPACITY_DEFAULT: 0.2,
-    EDGE_OPACITY_ACTIVE: 0.44,
-    EDGE_OPACITY_HIGHLIGHT: 0.76,
-    PARTICLE_COUNT_DEFAULT: 0,
-    PARTICLE_COUNT_ACTIVE: 0,
-    PARTICLE_COUNT_HIGHLIGHT: 0,
-    PARTICLE_SPEED: 0.18,
-    PARTICLE_SIZE: 2.0,
+    EDGE_WIDTH_DEFAULT: 0.55,
+    EDGE_WIDTH_ACTIVE: 0.9,
+    EDGE_WIDTH_HIGHLIGHT: 1.5,
+    EDGE_OPACITY_DEFAULT: 0.13,
+    EDGE_OPACITY_ACTIVE: 0.4,
+    EDGE_OPACITY_HIGHLIGHT: 0.7,
+    /* 流光脉冲（沿连线游走的光点） */
+    PULSE_MAX: 16,
+    PULSE_SPAWN_MIN: 0.4,
+    PULSE_SPAWN_MAX: 1.0,
+    PULSE_DUR_MIN: 2.2,
+    PULSE_DUR_MAX: 3.8,
+    PULSE_TRAIL: 0.09,
+    /* 星尘背景 */
+    STAR_COUNT: 170,
+    /* 全图缓慢漂移（世界坐标振幅） */
+    DRIFT_AMP_X: 6,
+    DRIFT_AMP_Y: 4.5,
+    /* 点击/聚焦涟漪 */
+    RIPPLE_LIFE: 1.1,
+    RIPPLE_MAX: 6,
+    /* 记忆碎片 */
+    FRAG_NEAR_MAX: 6,
+    FRAG_NEAR_SPAWN_MIN: 0.5,
+    FRAG_NEAR_SPAWN_MAX: 1.3,
+    FRAG_FADE: 0.7,
+    FRAG_HOLD: 2.8,
+    FRAG_RISE: 9,
+    FRAG_DRIFT_MAX: 3,
+    FRAG_DRIFT_SPAWN_MIN: 3,
+    FRAG_DRIFT_SPAWN_MAX: 5,
+    FRAG_DRIFT_EDGE_FADE: 170,
+    FRAG_MAX_CHARS: 18,
     /* Force-directed layout - optimized for natural clustering */
     FORCE_ITERATIONS: 400,
     FORCE_REPULSION: 1800,
@@ -32,9 +57,6 @@
     FORCE_GRAVITY: 0.008,
     FORCE_DAMPING: 0.82,
     FORCE_MAX_SPEED: 15,
-    /* Center node is larger */
-    CENTER_SCALE: 1.65,
-    CENTER_MAX_RADIUS: 15,
     /* Animation */
     ANIM_SPEED: 0.075,
     IDLE_DAMPING: 0.05,
@@ -45,9 +67,13 @@
     HOVER_RADIUS: 8,
   };
 
+  /* 恒星类型微着色（冷色系、低饱和，与「星夜」单强调色族一致） */
   const TYPE_COLORS = {
-    topic: "#7c6fca", person: "#2f9e8b", fact: "#c99a16",
-    summary: "#c8648d", other: "#8b949e",
+    topic: "#6f9df0",   // 主题 · 蓝
+    person: "#7d8bff",  // 人物 · 靛
+    fact: "#4fd8ce",    // 事实 · 青
+    summary: "#a88fff", // 记忆 · 紫
+    other: "#9aa3b8",   // 其他 · 中性
   };
 
   /* ── CSS helpers ───────────────────────────────────────────── */
@@ -101,7 +127,7 @@
   ForceDirectedLayout.prototype._layoutRadius = function(node) {
     var w = clamp(Number(node.weight || 0), 0, 20);
     var mr = clamp(Number(node.memory_count || 0), 0, 15);
-    var radius = CFG.NODE_RADIUS_BASE + Math.sqrt(w) * 0.75 + Math.sqrt(mr) * 0.4;
+    var radius = CFG.NODE_RADIUS_BASE + Math.sqrt(w) * 0.45 + Math.sqrt(mr) * 0.24;
     return clamp(radius, CFG.NODE_RADIUS_MIN, CFG.NODE_RADIUS_MAX);
   };
 
@@ -293,8 +319,19 @@
     this._drawnNodes = [];
     this._drawnEdges = [];
     this._labelBoxes = [];
-    this._particleOffsets = {};
     this._selection = null;
+    /* 星图动态元素 */
+    this._stars = null;
+    this.pulses = [];
+    this.ripples = [];
+    this._lastPulseSpawn = 0;
+    /* 记忆碎片层（默认开启，graph-ui 会按存储偏好覆盖） */
+    this.fragmentsEnabled = true;
+    this.fragPool = [];
+    this.nearFrags = [];
+    this.driftFrags = [];
+    this._fragSpawnAt = 0;
+    this._driftSpawnAt = 0;
   }
 
   Renderer.prototype.resize = function() {
@@ -315,24 +352,49 @@
     this.ctx.clearRect(0, 0, this.width, this.height);
   };
 
-  Renderer.prototype.drawBackground = function(dark) {
-    var ctx = this.ctx;
-    var step = clamp(30 * this.viewport.scale, 22, 42);
-    var ox = ((this.viewport.ox * this.viewport.scale) % step + step) % step;
-    var oy = ((this.viewport.oy * this.viewport.scale) % step + step) % step;
+  Renderer.prototype.drawBackground = function(dark, now) {
+    /* 透明画布：透出 CSS 星夜/晨雾渐变与极光光斑 */
+    this.ctx.clearRect(0, 0, this.width, this.height);
+    this._drawStardust(dark, now);
+  };
 
-    ctx.save();
-    ctx.fillStyle = dark ? "#202126" : themeColor("--bg-card", "#ffffff");
-    ctx.fillRect(0, 0, this.width, this.height);
-    ctx.fillStyle = dark ? "rgba(144,146,150,0.12)" : "rgba(108,117,125,0.13)";
-    for (var x = ox; x <= this.width; x += step) {
-      for (var y = oy; y <= this.height; y += step) {
-        ctx.beginPath();
-        ctx.arc(x, y, 0.75, 0, Math.PI * 2);
-        ctx.fill();
-      }
+  /* ── 星尘背景：缓慢闪烁 + 极慢漂移 ── */
+  Renderer.prototype._initStardust = function() {
+    if (this._stars) return;
+    var stars = [];
+    for (var i = 0; i < CFG.STAR_COUNT; i++) {
+      stars.push({
+        x: Math.random(),
+        y: Math.random(),
+        r: 0.5 + Math.random() * 1.2,
+        base: 0.28 + Math.random() * 0.55,
+        speed: 0.25 + Math.random() * 0.65,
+        phase: Math.random() * Math.PI * 2,
+      });
     }
-    ctx.restore();
+    this._stars = stars;
+  };
+
+  Renderer.prototype._drawStardust = function(dark, now) {
+    this._initStardust();
+    var ctx = this.ctx;
+    var w = this.width;
+    var h = this.height;
+    var dx = Math.sin(now * 0.02) * 9;
+    var dy = Math.cos(now * 0.015) * 7;
+    for (var i = 0; i < this._stars.length; i++) {
+      var s = this._stars[i];
+      var tw = 0.62 + 0.38 * Math.sin(now * s.speed + s.phase);
+      var a = s.base * tw * (dark ? 1 : 0.55);
+      if (a <= 0.01) continue;
+      var par = 0.4 + s.r * 0.4;
+      ctx.beginPath();
+      ctx.arc(s.x * w + dx * par, s.y * h + dy * par, s.r, 0, Math.PI * 2);
+      ctx.fillStyle = dark
+        ? "rgba(210,222,255," + a.toFixed(3) + ")"
+        : "rgba(110,130,200," + (a * 0.8).toFixed(3) + ")";
+      ctx.fill();
+    }
   };
 
   Renderer.prototype.worldToScreen = function(wx, wy) {
@@ -352,11 +414,11 @@
   Renderer.prototype.nodeWorldRadius = function(nodeData, isCenter) {
     var w = clamp(Number(nodeData.weight || 0), 0, 20);
     var mr = clamp(Number(nodeData.memory_count || 0), 0, 15);
-    var r = CFG.NODE_RADIUS_BASE + Math.sqrt(w) * 0.75 + Math.sqrt(mr) * 0.4;
+    var r = CFG.NODE_RADIUS_BASE + Math.sqrt(w) * 0.45 + Math.sqrt(mr) * 0.24;
     if (isCenter) {
       r = Math.min(CFG.CENTER_MAX_RADIUS, r * CFG.CENTER_SCALE);
     }
-    if (nodeData.isSelected) r += 1.5;
+    if (nodeData.isSelected) r += 1.2;
     return clamp(r, CFG.NODE_RADIUS_MIN, isCenter ? CFG.CENTER_MAX_RADIUS : CFG.NODE_RADIUS_MAX);
   };
 
@@ -368,8 +430,13 @@
     var ctx = this.ctx;
     var scale = this.viewport.scale;
     var dark = isDark();
+    var now = Date.now() / 1000;
     var selNodeId = (selection && selection.type === "node") ? selection.id : null;
     var selMemId = (selection && selection.type === "memory") ? selection.id : null;
+
+    /* 全图缓慢漂移（所有星点一起轻轻浮动） */
+    var driftX = Math.sin(now * 0.05) * CFG.DRIFT_AMP_X;
+    var driftY = Math.cos(now * 0.043) * CFG.DRIFT_AMP_Y;
 
     /* Build highlight sets */
     var highlightNodes = new Set();
@@ -394,10 +461,18 @@
         }
       });
     }
+    /* 悬停点亮关联子图（无选中焦点时） */
+    if (selNodeId === null && selMemId === null && hoverId != null && adjacency[hoverId]) {
+      highlightNodes.add(hoverId);
+      (adjacency[hoverId] || []).forEach(function(nid) { highlightNodes.add(nid); });
+      edges.forEach(function(edge) {
+        if (edge.source === hoverId || edge.target === hoverId) highlightEdges.add(edge.id);
+      });
+    }
 
     var centerId = layout ? layout.centerId : null;
 
-    this.drawBackground(dark);
+    this.drawBackground(dark, now);
 
     /* Compute animated positions */
     var ap = animProgress == null ? 1 : animProgress;
@@ -415,8 +490,8 @@
       var sAnim = { x: lerp(src._prevX || src.x, src.x, ap), y: lerp(src._prevY || src.y, src.y, ap) };
       var tAnim = { x: lerp(tgt._prevX || tgt.x, tgt.x, ap), y: lerp(tgt._prevY || tgt.y, tgt.y, ap) };
 
-      var ssp = this.worldToScreen(sAnim.x, sAnim.y);
-      var tsp = this.worldToScreen(tAnim.x, tAnim.y);
+      var ssp = this.worldToScreen(sAnim.x + driftX, sAnim.y + driftY);
+      var tsp = this.worldToScreen(tAnim.x + driftX, tAnim.y + driftY);
 
       var hasFocus = highlightNodes.size > 0 || highlightEdges.size > 0;
       var isActive = !hasFocus || (highlightNodes.has(edge.source) && highlightNodes.has(edge.target));
@@ -441,15 +516,9 @@
     }
     ctx.restore();
 
-    /* Particles */
-    ctx.save();
-    var now = Date.now() / 1000;
-    for (var p = 0; p < this._drawnEdges.length; p++) {
-      var de2 = this._drawnEdges[p];
-      if (de2.isMuted) continue;
-      this._drawParticles(ctx, de2, now, dark);
-    }
-    ctx.restore();
+    /* 流光脉冲：沿连线游走的光点 */
+    this._updatePulses(now);
+    this._drawPulses(ctx, now, dark);
 
     /* Draw nodes */
     this._drawnNodes = [];
@@ -459,7 +528,7 @@
       /* Animated position */
       var px = lerp(nd._prevX || nd.x, nd.x, ap);
       var py = lerp(nd._prevY || nd.y, nd.y, ap);
-      var sp = this.worldToScreen(px, py);
+      var sp = this.worldToScreen(px + driftX, py + driftY);
 
       var isCenter = centerId != null && nd.id === centerId;
       var isSel = nd.id === selNodeId;
@@ -480,17 +549,22 @@
       this._drawnNodes.push(drawInfo);
 
       if (drawInfo.isMuted && !drawInfo.isHovered) {
-        ctx.globalAlpha = 0.22;
+        ctx.globalAlpha = 0.18;
         ctx.beginPath();
-        ctx.arc(drawInfo.sx, drawInfo.sy, Math.max(2, drawInfo.sr * 0.62), 0, Math.PI * 2);
+        ctx.arc(drawInfo.sx, drawInfo.sy, Math.max(1.4, drawInfo.sr * 0.6), 0, Math.PI * 2);
         ctx.fillStyle = dark ? "#5c6370" : "#c7ccd4";
         ctx.fill();
         ctx.globalAlpha = 1;
         continue;
       }
-      this._drawNode(ctx, drawInfo, scale, dark);
+      this._drawNode(ctx, drawInfo, scale, dark, now);
     }
     ctx.restore();
+
+    /* 涟漪 + 记忆碎片 */
+    this._drawRipples(ctx, now, dark);
+    this._updateFragments(now);
+    this._drawFragments(ctx, now, dark);
   };
 
   /* Draw a single edge as a straight link */
@@ -512,67 +586,399 @@
     ctx.lineTo(de.tx, de.ty);
     ctx.strokeStyle = de.isHighlighted || (de.hasFocus && de.isActive)
       ? hexToRgba(de.color, opacity)
-      : dark ? "rgba(150,157,168," + opacity + ")" : "rgba(91,103,120," + opacity + ")";
+      : dark ? "rgba(168,180,225," + opacity + ")" : "rgba(96,112,150," + opacity + ")";
     ctx.lineWidth = width;
     ctx.lineCap = "round";
     ctx.stroke();
   };
 
-  Renderer.prototype._drawParticles = function(ctx, de, now, dark) {
-    if (!de.isActive && !de.isHighlighted) return;
-    var count = de.isHighlighted ? CFG.PARTICLE_COUNT_HIGHLIGHT
-      : de.isActive ? CFG.PARTICLE_COUNT_ACTIVE : CFG.PARTICLE_COUNT_DEFAULT;
-    if (count <= 0) return;
-
-    var key = de.id;
-    if (!(key in this._particleOffsets)) this._particleOffsets[key] = Math.random();
-
-    for (var i = 0; i < count; i++) {
-      var t = ((now * CFG.PARTICLE_SPEED + this._particleOffsets[key] + i / count) % 1 + 1) % 1;
-      var px = lerp(de.sx, de.tx, t);
-      var py = lerp(de.sy, de.ty, t);
-      ctx.beginPath();
-      ctx.arc(px, py, CFG.PARTICLE_SIZE * (de.isHighlighted ? 1.35 : 1), 0, Math.PI * 2);
-      ctx.fillStyle = hexToRgba(de.color, de.isHighlighted ? 0.82 : 0.46);
-      ctx.fill();
+  /* ── 流光脉冲：光点沿连线游走 ── */
+  Renderer.prototype._updatePulses = function(now) {
+    var interval = CFG.PULSE_SPAWN_MIN + Math.random() * (CFG.PULSE_SPAWN_MAX - CFG.PULSE_SPAWN_MIN);
+    if (now - this._lastPulseSpawn > interval) {
+      this._lastPulseSpawn = now;
+      if (this.pulses.length < CFG.PULSE_MAX && this._drawnEdges.length) {
+        var candidates = this._drawnEdges.filter(function(de) { return !de.isMuted; });
+        if (candidates.length) {
+          var de = candidates[(Math.random() * candidates.length) | 0];
+          this.pulses.push({
+            edgeId: de.id,
+            t0: now,
+            dur: CFG.PULSE_DUR_MIN + Math.random() * (CFG.PULSE_DUR_MAX - CFG.PULSE_DUR_MIN),
+            fwd: Math.random() < 0.5,
+            color: de.color,
+            hl: de.isHighlighted,
+          });
+        }
+      }
+    }
+    if (this.pulses.length) {
+      var self = this;
+      this.pulses = this.pulses.filter(function(p) {
+        return (now - p.t0) < p.dur && self._edgeById(p.edgeId);
+      });
     }
   };
 
-  /* Draw a single circular node */
-  Renderer.prototype._drawNode = function(ctx, dn, scale, dark) {
-    var x = dn.sx, y = dn.sy, r = dn.sr;
+  Renderer.prototype._edgeById = function(edgeId) {
+    for (var i = 0; i < this._drawnEdges.length; i++) {
+      if (this._drawnEdges[i].id === edgeId) return this._drawnEdges[i];
+    }
+    return null;
+  };
 
+  Renderer.prototype._drawPulses = function(ctx, now, dark) {
+    if (!this.pulses.length) return;
     ctx.save();
-    ctx.globalAlpha = dn.isMuted ? 0.26 : 1;
+    if (dark) ctx.globalCompositeOperation = "lighter";
+    for (var i = 0; i < this.pulses.length; i++) {
+      var p = this.pulses[i];
+      var de = this._edgeById(p.edgeId);
+      if (!de) continue;
 
-    var halo = (dn.isSelected ? 7 : dn.isHovered ? 5 : dn.isCenter ? 4 : 0) * scale;
-    if (halo > 0 && !dn.isMuted) {
+      var t = clamp((now - p.t0) / p.dur, 0, 1);
+      t = t * t * (3 - 2 * t); /* smoothstep */
+      var head = p.fwd ? t : 1 - t;
+      var tail = p.fwd
+        ? clamp(head - CFG.PULSE_TRAIL, 0, 1)
+        : clamp(head + CFG.PULSE_TRAIL, 0, 1);
+
+      var hx = lerp(de.sx, de.tx, head);
+      var hy = lerp(de.sy, de.ty, head);
+      var tx2 = lerp(de.sx, de.tx, tail);
+      var ty2 = lerp(de.sy, de.ty, tail);
+
+      /* 光尾 */
+      var grad = ctx.createLinearGradient(tx2, ty2, hx, hy);
+      grad.addColorStop(0, hexToRgba(p.color, 0));
+      grad.addColorStop(1, hexToRgba(p.color, p.hl ? 0.75 : 0.45));
       ctx.beginPath();
-      ctx.arc(x, y, r + halo, 0, Math.PI * 2);
-      ctx.fillStyle = hexToRgba(dn.color, dn.isSelected ? 0.14 : 0.08);
+      ctx.moveTo(tx2, ty2);
+      ctx.lineTo(hx, hy);
+      ctx.strokeStyle = grad;
+      ctx.lineWidth = 1.4;
+      ctx.lineCap = "round";
+      ctx.stroke();
+
+      /* 亮点头 */
+      ctx.beginPath();
+      ctx.arc(hx, hy, p.hl ? 2.1 : 1.6, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(255,255,255," + (p.hl ? 0.95 : 0.8) + ")";
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(hx, hy, p.hl ? 4.6 : 3.6, 0, Math.PI * 2);
+      ctx.fillStyle = hexToRgba(p.color, 0.22);
       ctx.fill();
     }
+    ctx.restore();
+  };
 
-    ctx.beginPath();
-    ctx.arc(x, y, r, 0, Math.PI * 2);
-    ctx.fillStyle = dn.isMuted ? (dark ? "#5c6370" : "#c7ccd4") : dn.color;
-    ctx.fill();
+  /* ── 涟漪：点击/聚焦时扩散环 ── */
+  Renderer.prototype.spawnRipple = function(nodeId) {
+    for (var i = 0; i < this._drawnNodes.length; i++) {
+      var dn = this._drawnNodes[i];
+      if (dn.id === nodeId) {
+        this.ripples.push({ x: dn.sx, y: dn.sy, t0: Date.now() / 1000 });
+        if (this.ripples.length > CFG.RIPPLE_MAX) this.ripples.shift();
+        return;
+      }
+    }
+  };
 
-    ctx.lineWidth = dn.isSelected ? 2 : dn.isHovered || dn.isCenter ? 1.5 : 1;
-    ctx.strokeStyle = dn.isSelected || dn.isHovered || dn.isCenter
-      ? (dn.isMuted ? (dark ? "#6f7683" : "#b9c0ca") : dn.color)
-      : dark ? "#202126" : "#ffffff";
-    ctx.stroke();
+  Renderer.prototype._drawRipples = function(ctx, now, dark) {
+    if (!this.ripples.length) return;
+    var self = this;
+    this.ripples = this.ripples.filter(function(r) { return (now - r.t0) < CFG.RIPPLE_LIFE; });
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    for (var i = 0; i < this.ripples.length; i++) {
+      var r = this.ripples[i];
+      var p = clamp((now - r.t0) / CFG.RIPPLE_LIFE, 0, 1);
+      var ease = 1 - Math.pow(1 - p, 2);
+      var fade = 1 - p;
+      var rad = 10 + ease * 62;
 
-    var prominent = dn.degree >= 4 || dn.memoryCount >= 3 || dn.labelScore >= 11;
-    var labelVisible = dn.isHovered || dn.isSelected || dn.isCenter ||
-      (!dn.hasFocus && scale > 0.72 && prominent) ||
-      (!dn.hasFocus && scale > 1.12 && dn.degree >= 2);
-    if (!labelVisible || dn.isMuted) {
-      ctx.restore();
+      ctx.beginPath();
+      ctx.arc(r.x, r.y, rad, 0, Math.PI * 2);
+      ctx.strokeStyle = dark ? "rgba(160,190,255," + (fade * 0.5).toFixed(3) + ")" : "rgba(111,157,240," + (fade * 0.45).toFixed(3) + ")";
+      ctx.lineWidth = 1.3;
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(r.x, r.y, rad * 0.62, 0, Math.PI * 2);
+      ctx.strokeStyle = dark ? "rgba(160,190,255," + (fade * 0.3).toFixed(3) + ")" : "rgba(111,157,240," + (fade * 0.26).toFixed(3) + ")";
+      ctx.lineWidth = 0.9;
+      ctx.stroke();
+    }
+    ctx.restore();
+  };
+
+  /* ── 记忆碎片层：①星点旁浮现（带引导线） ②横穿星域的飘过碎片 ── */
+  Renderer.prototype.setFragmentPool = function(pool) {
+    this.fragPool = Array.isArray(pool)
+      ? pool.filter(function(s) { return s && String(s).trim(); }).map(String)
+      : [];
+  };
+
+  Renderer.prototype.setFragmentsEnabled = function(on) {
+    this.fragmentsEnabled = !!on;
+    if (!on) {
+      this.nearFrags = [];
+      this.driftFrags = [];
+    }
+  };
+
+  Renderer.prototype._pickFragText = function() {
+    if (!this.fragPool.length) return null;
+    var t = this.fragPool[(Math.random() * this.fragPool.length) | 0];
+    t = String(t).replace(/\s+/g, " ").trim();
+    if (t.length > CFG.FRAG_MAX_CHARS) t = t.substring(0, CFG.FRAG_MAX_CHARS) + "…";
+    return t;
+  };
+
+  Renderer.prototype._updateFragments = function(now) {
+    if (!this.fragmentsEnabled || !this.fragPool.length) {
+      if (this.nearFrags.length) this.nearFrags = [];
+      if (this.driftFrags.length) this.driftFrags = [];
       return;
     }
 
+    /* ① 星点旁浮现碎片 */
+    var spawnIn = CFG.FRAG_NEAR_SPAWN_MIN + Math.random() * (CFG.FRAG_NEAR_SPAWN_MAX - CFG.FRAG_NEAR_SPAWN_MIN);
+    if (now - this._fragSpawnAt > spawnIn && this.nearFrags.length < CFG.FRAG_NEAR_MAX) {
+      this._fragSpawnAt = now;
+      var cands = this._drawnNodes.filter(function(n) {
+        return !n.isMuted && n.sx > 60 && n.sx < this.width - 180 && n.sy > 60 && n.sy < this.height - 70;
+      }, this);
+      if (cands.length) {
+        var n = cands[(Math.random() * cands.length) | 0];
+        var text = this._pickFragText();
+        if (text) {
+          var ang = -Math.PI / 2 + (Math.random() - 0.5) * 1.7;
+          var dist = n.sr + 16 + Math.random() * 22;
+          this.nearFrags.push({
+            nx: n.id,
+            text: text,  /* 必须带上，否则画成 "undefined" */
+            x: n.sx + Math.cos(ang) * dist,
+            y: n.sy + Math.sin(ang) * dist,
+            vx: (Math.random() - 0.5) * 2.4,
+            vy: -CFG.FRAG_RISE * (0.6 + Math.random() * 0.5),
+            t0: now,
+            dur: CFG.FRAG_FADE + CFG.FRAG_HOLD + CFG.FRAG_FADE,
+          });
+        }
+      }
+    }
+    var life = CFG.FRAG_FADE + CFG.FRAG_HOLD + CFG.FRAG_FADE;
+    this.nearFrags = this.nearFrags.filter(function(f) { return (now - f.t0) < life; });
+
+    /* ② 飘过碎片 */
+    var driftIn = CFG.FRAG_DRIFT_SPAWN_MIN + Math.random() * (CFG.FRAG_DRIFT_SPAWN_MAX - CFG.FRAG_DRIFT_SPAWN_MIN);
+    if (now - this._driftSpawnAt > driftIn && this.driftFrags.length < CFG.FRAG_DRIFT_MAX) {
+      this._driftSpawnAt = now;
+      var text2 = this._pickFragText();
+      if (text2) {
+        var fromLeft = Math.random() < 0.5;
+        var speed = (this.width + 380) / (12 + Math.random() * 4);
+        this.driftFrags.push({
+          x: fromLeft ? -200 : this.width + 200,
+          y: this.height * (0.08 + Math.random() * 0.38),
+          text: text2,  /* 必须带上，否则画成 "undefined" */
+          vx: (fromLeft ? 1 : -1) * speed,
+          t0: now,
+        });
+      }
+    }
+    this.driftFrags = this.driftFrags.filter(function(f) {
+      return f.x > -260 && f.x < this.width + 260;
+    }, this);
+  };
+
+  Renderer.prototype._drawFragments = function(ctx, now, dark) {
+    if (!this.fragmentsEnabled) return;
+    var fragFade = CFG.FRAG_FADE;
+    ctx.save();
+
+    /* ① 星点旁浮现：细引导线 + 短文字 */
+    for (var i = 0; i < this.nearFrags.length; i++) {
+      var f = this.nearFrags[i];
+      var age = now - f.t0;
+      var alpha = age < fragFade
+        ? age / fragFade
+        : age > f.dur - fragFade ? Math.max(0, (f.dur - age) / fragFade) : 1;
+      if (alpha <= 0.01) continue;
+
+      var node = null;
+      for (var j = 0; j < this._drawnNodes.length; j++) {
+        if (this._drawnNodes[j].id === f.nx) { node = this._drawnNodes[j]; break; }
+      }
+      if (!node || node.isMuted) continue;
+
+      var fx = f.x + f.vx * age;
+      var fy = f.y + f.vy * age;
+
+      /* 引导线：从星点边缘指向文字 */
+      var dx = fx - node.sx;
+      var dy = fy - node.sy;
+      var len = Math.sqrt(dx * dx + dy * dy) || 1;
+      var sx2 = node.sx + (dx / len) * (node.sr * 1.5);
+      var sy2 = node.sy + (dy / len) * (node.sr * 1.5);
+      var ex2 = fx - (dx / len) * 4;
+      var ey2 = fy - (dy / len) * 4;
+      ctx.beginPath();
+      ctx.moveTo(sx2, sy2);
+      ctx.lineTo(ex2, ey2);
+      ctx.strokeStyle = dark
+        ? "rgba(190,205,245," + (alpha * 0.34).toFixed(3) + ")"
+        : "rgba(90,110,170," + (alpha * 0.4).toFixed(3) + ")";
+      ctx.lineWidth = 0.7;
+      ctx.stroke();
+
+      ctx.font = "11.5px -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif";
+      var textW = ctx.measureText(f.text).width;
+
+      /* 文字胶囊底：让短句在任何背景下都可读、更醒目 */
+      var padX = 8, padY = 4.5, capH = 20, capR = 10;
+      var capX = fx >= node.sx ? fx - padX : fx - textW - padX;
+      ctx.beginPath();
+      ctx.moveTo(capX + capR, fy - capH / 2);
+      ctx.lineTo(capX + textW + padX * 2 - capR, fy - capH / 2);
+      ctx.arcTo(capX + textW + padX * 2, fy - capH / 2, capX + textW + padX * 2, fy - capH / 2 + capR, capR);
+      ctx.lineTo(capX + textW + padX * 2, fy + capH / 2 - capR);
+      ctx.arcTo(capX + textW + padX * 2, fy + capH / 2, capX + textW + padX * 2 - capR, fy + capH / 2, capR);
+      ctx.lineTo(capX + capR, fy + capH / 2);
+      ctx.arcTo(capX, fy + capH / 2, capX, fy + capH / 2 - capR, capR);
+      ctx.lineTo(capX, fy - capH / 2 + capR);
+      ctx.arcTo(capX, fy - capH / 2, capX + capR, fy - capH / 2, capR);
+      ctx.closePath();
+      ctx.fillStyle = dark
+        ? "rgba(24,33,62," + (alpha * 0.62).toFixed(3) + ")"
+        : "rgba(252,253,255," + (alpha * 0.68).toFixed(3) + ")";
+      ctx.fill();
+      ctx.strokeStyle = dark
+        ? "rgba(140,160,220," + (alpha * 0.3).toFixed(3) + ")"
+        : "rgba(120,140,200," + (alpha * 0.32).toFixed(3) + ")";
+      ctx.lineWidth = 0.8;
+      ctx.stroke();
+
+      ctx.textAlign = fx >= node.sx ? "left" : "right";
+      ctx.textBaseline = "middle";
+      ctx.fillStyle = dark
+        ? "rgba(232,239,255," + (alpha * 0.95).toFixed(3) + ")"
+        : "rgba(44,56,92," + (alpha * 0.9).toFixed(3) + ")";
+      ctx.fillText(f.text, fx, fy);
+    }
+
+    /* ② 飘过碎片：斜体、低透明度、缓慢横穿星域 */
+    ctx.font = "italic 12px -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    for (var k = 0; k < this.driftFrags.length; k++) {
+      var d = this.driftFrags[k];
+      var dAge = now - d.t0;
+      var edgeFade = Math.min(1, Math.min(d.x, this.width - d.x) / CFG.FRAG_DRIFT_EDGE_FADE);
+      if (edgeFade <= 0) continue;
+      var dAlpha = Math.min(1, dAge / 1.6) * edgeFade * 0.55;
+      if (dAlpha <= 0.01) continue;
+      ctx.fillStyle = dark
+        ? "rgba(214,224,250," + dAlpha.toFixed(3) + ")"
+        : "rgba(60,74,116," + (dAlpha * 1.15).toFixed(3) + ")";
+      ctx.fillText(d.text, d.x, d.y);
+      d.x += d.vx * 0.016; /* 帧步进近似 */
+    }
+
+    ctx.restore();
+  };
+
+  /* Draw a single circular node */
+  Renderer.prototype._drawNode = function(ctx, dn, scale, dark, now) {
+    var x = dn.sx, y = dn.sy, r = dn.sr;
+    var col = dn.color;
+
+    ctx.save();
+    /* 夜间用叠加发光，白天普通合成（additive 会发白） */
+    if (dark) ctx.globalCompositeOperation = "lighter";
+    ctx.globalAlpha = dn.isMuted ? 0.26 : 1;
+
+    /* 呼吸（幅度减半）：光晕 ±4% */
+    var breath = 1 + Math.sin(now * 0.9 + (dn.id % 17) * 0.37) * 0.04;
+
+    /* ① 透明渐变光晕（收紧） */
+    var haloBoost = (dn.isSelected ? 8 : dn.isHovered ? 6 : dn.isCenter ? 4 : 0) * scale;
+    var haloR = r * 2.4 * breath + haloBoost;
+    var grad = ctx.createRadialGradient(x, y, r * 0.2, x, y, haloR);
+    grad.addColorStop(0, hexToRgba(col, dark ? 0.34 : 0.30));
+    grad.addColorStop(0.45, hexToRgba(col, dark ? 0.17 : 0.14));
+    grad.addColorStop(1, hexToRgba(col, 0));
+    ctx.beginPath();
+    ctx.arc(x, y, haloR, 0, Math.PI * 2);
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    /* ② 类型色冕 */
+    ctx.beginPath();
+    ctx.arc(x, y, r * 0.92, 0, Math.PI * 2);
+    ctx.fillStyle = hexToRgba(col, dark ? 0.85 : 0.92);
+    ctx.fill();
+
+    /* ③ 白热内核 */
+    ctx.beginPath();
+    ctx.arc(x, y, r * 0.45, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(255,255,255," + (dark ? 0.96 : 0.9) + ")";
+    ctx.fill();
+    if (!dark) {
+      ctx.beginPath();
+      ctx.arc(x, y, r * 0.92, 0, Math.PI * 2);
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = hexToRgba(col, 0.8);
+      ctx.stroke();
+    }
+
+    /* 选中/悬停外环 */
+    if (dn.isSelected || dn.isHovered) {
+      ctx.beginPath();
+      ctx.arc(x, y, r + 3.5 * scale, 0, Math.PI * 2);
+      ctx.lineWidth = dn.isSelected ? 1.6 : 1.1;
+      ctx.strokeStyle = hexToRgba(col, dn.isSelected ? 0.9 : 0.6);
+      ctx.stroke();
+    }
+
+    /* 大节点：倾斜细环（缓慢旋转）+ 十字星芒 */
+    var grand = dn.isCenter || dn.isSelected || dn.degree >= 6 || dn.memoryCount >= 6;
+    if (grand && !dn.isMuted) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(now * 0.15 + (dn.id % 13));
+      ctx.beginPath();
+      ctx.ellipse(0, 0, r * 1.7, r * 0.55, 0, 0, Math.PI * 2);
+      ctx.lineWidth = 0.8;
+      ctx.strokeStyle = hexToRgba(col, dark ? 0.32 : 0.4);
+      ctx.stroke();
+      ctx.restore();
+
+      var sr2 = r * (1.9 + Math.sin(now * 0.7 + dn.id) * 0.08);
+      ctx.save();
+      if (dark) ctx.globalCompositeOperation = "lighter";
+      ctx.lineWidth = 0.9;
+      ctx.strokeStyle = "rgba(255,255,255," + (dark ? 0.5 : 0.35) + ")";
+      ctx.beginPath();
+      ctx.moveTo(x - sr2, y);
+      ctx.lineTo(x + sr2, y);
+      ctx.moveTo(x, y - sr2);
+      ctx.lineTo(x, y + sr2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    ctx.restore();
+
+    /* 标签：只在悬停/选中/焦点节点显示，平时保持纯净星空 */
+    var labelVisible = dn.isHovered || dn.isSelected || dn.isCenter;
+    if (!labelVisible || dn.isMuted) {
+      return;
+    }
+
+    ctx.save();
     var fontSize = Math.max(10, CFG.NODE_FONT_SIZE * scale);
     ctx.fillStyle = dark ? "#e9ecef" : "#2f343a";
     ctx.font = (dn.isSelected || dn.isCenter ? "600 " : "500 ") + fontSize + "px -apple-system, BlinkMacSystemFont, sans-serif";
@@ -867,12 +1273,13 @@
 
     var boundsW = Math.max(1, maxX - minX);
     var boundsH = Math.max(1, maxY - minY);
-    var padding = this.renderer.width < 520 ? 0.88 : 0.8;
+    var padding = this.renderer.width < 520 ? 0.86 : 0.74;
     var fitScale = Math.min(
       (this.renderer.width * padding) / boundsW,
       (this.renderer.height * padding) / boundsH
     );
-    var scale = clamp(fitScale, 0.35, 1.65);
+    /* 上限放宽到 2.8：节点少时星群也铺满画布，而不是缩在中间一小坨 */
+    var scale = clamp(fitScale, 0.35, 2.8);
     var cx = (minX + maxX) / 2;
     var cy = (minY + maxY) / 2;
 
@@ -1065,11 +1472,15 @@
     var rawNodes = snapshot.nodes || [];
     var rawEdges = snapshot.edges || [];
 
-    /* Convert to internal format */
+    /* Convert to internal format.
+       注意：id 必须收敛为有限数字——非数字 id 经 Number() 会变 NaN，
+       而 seenIds/edgeSeen 以对象为容器时所有 NaN 是同一个键，会把
+       全部节点/边错误去重成 1 条（画布只剩一条线的根因之一）。 */
     var seenIds = {};
     var nodes = [];
-    rawNodes.forEach(function(node) {
+    rawNodes.forEach(function(node, idx) {
       var id = Number(node.id);
+      if (!Number.isFinite(id)) id = idx + 1;
       if (seenIds[id]) return;
       seenIds[id] = true;
       nodes.push({
@@ -1092,7 +1503,10 @@
     var edges = [];
     var edgeSeen = {};
     rawEdges.forEach(function(edge) {
-      var eid = edge.id != null ? Number(edge.id) : (edge.source + ":" + edge.target + ":" + edge.memory_id);
+      var rawId = Number(edge.id);
+      var eid = (edge.id != null && Number.isFinite(rawId))
+        ? rawId
+        : (edge.source + ":" + edge.target + ":" + edge.memory_id);
       if (edgeSeen[eid]) return;
       edgeSeen[eid] = true;
       edges.push({
@@ -1139,6 +1553,7 @@
     this.renderer._selection = this.selection;
     /* Recenter on selected node with smooth animation */
     this.animator.recenter(nodeId);
+    if (this.renderer) this.renderer.spawnRipple(nodeId);
   };
 
   Graph2D.prototype.selectMemory = function(memoryId) {
@@ -1146,9 +1561,21 @@
     this.renderer._selection = this.selection;
     if (this._mem2node && this._mem2node[memoryId]) {
       var nodes = Array.from(this._mem2node[memoryId]);
-      if (nodes.length) this.animator.recenter(nodes[0]);
+      if (nodes.length) {
+        this.animator.recenter(nodes[0]);
+        if (this.renderer) this.renderer.spawnRipple(nodes[0]);
+      }
     }
     this.animator.wake();
+  };
+
+  /* ── 记忆碎片层控制（graph-ui 调用） ── */
+  Graph2D.prototype.setFragmentPool = function(pool) {
+    if (this.renderer) this.renderer.setFragmentPool(pool);
+  };
+
+  Graph2D.prototype.setFragmentsEnabled = function(on) {
+    if (this.renderer) this.renderer.setFragmentsEnabled(on);
   };
 
   Graph2D.prototype.clearSelection = function() {
@@ -1176,7 +1603,8 @@
   };
 
   function relationColor(type) {
-    var palette = ["#8792a2", "#6f7f96", "#8a7b65", "#74806c", "#8a7181", "#6f8388"];
+    /* 关系线配色：蓝灰族低饱和（星夜氛围，不抢节点的类型微着色） */
+    var palette = ["#7f8cb8", "#7385ab", "#8b87a8", "#6f93a8", "#8a7f9e", "#7c96b5"];
     var h = String(type || "related").split("").reduce(function(a, c) { return a * 31 + c.charCodeAt(0); }, 7);
     return palette[Math.abs(h) % palette.length];
   }

@@ -30,8 +30,8 @@
   }
 
   const NODE_TYPE_COLORS = {
-    topic: "#7c6fca", person: "#2f9e8b", fact: "#c99a16",
-    summary: "#c8648d", other: "#8b949e",
+    topic: "#6f9df0", person: "#7d8bff", fact: "#4fd8ce",
+    summary: "#a88fff", other: "#9aa3b8",
   };
 
   /* ================================================================
@@ -81,10 +81,72 @@
   }
 
   /* ================================================================
+     记忆碎片层：碎片开关 + 文字池（来自真实记忆摘要/条目/节点名）
+     ================================================================ */
+  var FRAG_KEY = "lmem_fragments";
+  var fragmentsOn = true;
+
+  function updateFragmentsBtn(btn) {
+    btn.classList.toggle("on", fragmentsOn);
+    btn.textContent = window.t(fragmentsOn ? "graph.fragmentsOn" : "graph.fragmentsOff");
+    btn.title = window.t("graph.fragmentsTip");
+  }
+
+  function initFragmentsToggle() {
+    var btn = document.getElementById("graph-fragments-btn");
+    if (!btn) return;
+    try {
+      fragmentsOn = localStorage.getItem(FRAG_KEY) !== "off";
+    } catch (e) { /* ignore */ }
+    window.Graph2D.setFragmentsEnabled(fragmentsOn);
+    updateFragmentsBtn(btn);
+
+    btn.addEventListener("click", function() {
+      fragmentsOn = !fragmentsOn;
+      try {
+        localStorage.setItem(FRAG_KEY, fragmentsOn ? "on" : "off");
+      } catch (e) { /* ignore */ }
+      window.Graph2D.setFragmentsEnabled(fragmentsOn);
+      updateFragmentsBtn(btn);
+    });
+  }
+
+  function buildFragmentPool(payload) {
+    var snapshot = (payload && payload.snapshot) || {};
+    /* 优先用真实记忆摘要/条目内容，节点名（常为英文实体词）只少量补充 */
+    var pool = [];
+    (snapshot.memories || []).forEach(function(m) {
+      var t = m.summary || m.text || m.content || "";
+      if (t) pool.push(t);
+    });
+    var memoCount = pool.length;
+    (snapshot.entries || []).forEach(function(en) {
+      var t = en.summary || en.text || en.content || "";
+      if (t) pool.push(t);
+    });
+    var contentCount = pool.length;
+    (snapshot.nodes || []).forEach(function(n) {
+      if (n.label && pool.length - contentCount < 20) pool.push(n.label);
+    });
+    /* 若记忆内容太少，用节点名垫底；否则截断在内容类文本之后 */
+    var cap = Math.max(contentCount + 20, memoCount + 40);
+    return pool.slice(0, Math.min(cap, 220));
+  }
+
+  /* 供阅读层「图谱定位」调用：按记忆 ID 聚焦关系子图 */
+  window.lmGotoGraphFocus = function(memoryId) {
+    var id = Number(memoryId);
+    if (!Number.isFinite(id)) return;
+    if (dom.memoryInput) dom.memoryInput.value = String(id);
+    focusMemory();
+  };
+
+  /* ================================================================
      Init
      ================================================================ */
   function init() {
     initLabels();
+    initFragmentsToggle();
     dom.queryInput = document.getElementById("graph-query-input");
     dom.sessionInput = document.getElementById("graph-session-filter");
     dom.memoryInput = document.getElementById("graph-memory-id");
@@ -125,6 +187,8 @@
         },
       });
       state.isGraphReady = true;
+      /* 渲染器刚创建，重新应用碎片开关的存储偏好 */
+      window.Graph2D.setFragmentsEnabled(fragmentsOn);
       setCanvasMessage(window.t("graph.canvasDefault"), false);
     } else {
       setCanvasMessage(window.t("graph2d.moduleFail"), false);
@@ -133,6 +197,8 @@
     window.addEventListener("languagechange", function() {
       initLabels();
       if (state.payload) renderLegend(state.payload);
+      var fragBtn = document.getElementById("graph-fragments-btn");
+      if (fragBtn) updateFragmentsBtn(fragBtn);
       if (!state.payload && dom.canvasState && dom.canvasState.textContent) {
         setCanvasMessage(window.t("graph.canvasDefault"), false);
       }
@@ -240,6 +306,11 @@
   function renderPayload(payload, focusSelection) {
     state.payload = payload;
     state.graphIndex = buildGraphIndex(payload.snapshot || {});
+
+    /* 喂给碎片层一批真实记忆文字 */
+    if (window.Graph2D && window.Graph2D.setFragmentPool) {
+      window.Graph2D.setFragmentPool(buildFragmentPool(payload));
+    }
 
     if (!payload.enabled) {
       setCanvasMessage(window.t("graph.disabledCanvas"), false);

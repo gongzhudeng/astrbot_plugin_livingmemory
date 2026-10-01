@@ -9,6 +9,7 @@ from .memory_handler import MemoryHandler
 from .prompt_handler import PromptHandler
 from .recall_handler import RecallHandler
 from .stats_handler import StatsHandler
+from .ui_pref_handler import UiPrefHandler
 from .utils import PageApiUtils
 
 __all__ = [
@@ -19,5 +20,6 @@ __all__ = [
     "BackupHandler",
     "PromptHandler",
     "ConsolidationHandler",
+    "UiPrefHandler",
     "PageApiUtils",
 ]

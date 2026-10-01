@@ -15,6 +15,8 @@ export class PromptPage {
     this.editContent = null;
     this._resetMode = false;
     this._editorGeneration = 0;
+    this._editorHome = null;    // 编辑器在 index.html 中的原始挂载点
+    this._editorDetail = null;  // 当前编辑提示词的详情（用于重渲染后恢复）
   }
 
   /**
@@ -50,6 +52,18 @@ export class PromptPage {
   render() {
     const container = document.getElementById("prompt-content");
     if (!container) return;
+
+    // 若编辑器正打开：先记下草稿并把它挪回原始挂载点，避免被下面的 innerHTML 重建销毁
+    const editorEl = document.getElementById("prompt-editor");
+    const wasOpen = Boolean(this.editingId && editorEl && !editorEl.classList.contains("hidden"));
+    let draft = null;
+    if (wasOpen && editorEl) {
+      const ta = document.getElementById("prompt-editor-textarea");
+      draft = ta ? ta.value : null;
+      if (this._editorHome && editorEl.parentNode !== this._editorHome) {
+        this._editorHome.appendChild(editorEl);
+      }
+    }
 
     if (!this.prompts.length) {
       container.innerHTML =
@@ -174,6 +188,61 @@ export class PromptPage {
         this.openEditor(id);
       });
     });
+
+    // 重渲染后恢复仍在打开的编辑器（内联回到原条目下方）
+    if (wasOpen) this._remountEditor(draft);
+  }
+
+  /**
+   * 把编辑器内联挂载到指定提示词条目的下方
+   * @param {string} promptId - 提示词ID
+   * @returns {boolean} 是否挂载成功
+   */
+  _mountEditorInline(promptId) {
+    const container = document.getElementById("prompt-content");
+    const editorEl = document.getElementById("prompt-editor");
+    if (!container || !editorEl) return false;
+    const target = Array.from(container.querySelectorAll(".prompt-item"))
+      .find((el) => el.dataset.id === promptId);
+    if (!target) return false;
+    target.insertAdjacentElement("afterend", editorEl);
+    return true;
+  }
+
+  /**
+   * 列表重渲染后，把仍处于打开状态的编辑器挂回原条目下方并恢复内容
+   * @param {string|null} draft - 重渲染前编辑器里的草稿
+   */
+  _remountEditor(draft) {
+    const editorEl = document.getElementById("prompt-editor");
+    if (!editorEl || !this.editingId) return;
+    if (!this._mountEditorInline(this.editingId)) {
+      editorEl.classList.add("hidden");
+      return;
+    }
+
+    const prompt = this.prompts.find((p) => p.id === this.editingId);
+    const detail = this._editorDetail || {};
+    const titleEl = document.getElementById("prompt-editor-title");
+    if (prompt && titleEl) {
+      titleEl.textContent = this._pickLang(prompt.name, prompt.name_en) || prompt.id;
+    }
+    const varsEl = document.getElementById("prompt-editor-vars");
+    if (varsEl) {
+      varsEl.innerHTML = (detail.variables || [])
+        .map((v) => '<code class="prompt-var-tag">' + esc(v) + "</code>")
+        .join(" ");
+    }
+    const statusEl = document.getElementById("prompt-editor-status");
+    if (statusEl) {
+      statusEl.textContent = detail.is_custom
+        ? " " + window.t("prompt.customizedStatus")
+        : " " + window.t("prompt.defaultStatus");
+    }
+    const textarea = document.getElementById("prompt-editor-textarea");
+    if (textarea) textarea.value = draft !== null ? draft : this.editContent;
+    editorEl.classList.remove("hidden");
+    editorEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }
 
   /**
@@ -193,9 +262,11 @@ export class PromptPage {
       if (generation !== this._editorGeneration) return;
       this.editingId = promptId;
       this.editContent = detail.content || "";
+      this._editorDetail = detail;
 
       const editorEl = document.getElementById("prompt-editor");
       if (!editorEl) return;
+      if (!this._editorHome) this._editorHome = editorEl.parentNode;
 
       document.getElementById("prompt-editor-title").textContent =
         this._pickLang(prompt.name, prompt.name_en) || prompt.id;
@@ -214,6 +285,10 @@ export class PromptPage {
         ? " " + window.t("prompt.customizedStatus")
         : " " + window.t("prompt.defaultStatus");
 
+      // 内联展开：挂载到被点击条目的正下方，而不是页面底部
+      if (!this._mountEditorInline(promptId) && this._editorHome) {
+        this._editorHome.appendChild(editorEl);
+      }
       editorEl.classList.remove("hidden");
 
       // 绑定按钮事件
