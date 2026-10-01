@@ -147,21 +147,33 @@ class EventHandler:
     ) -> list[dict[str, str]]:
         """Expose recently created memories to trusted sibling plugins.
 
-        Returns at most ``limit`` active memories of one session whose
-        canonical create time (``metadata.create_time``, falling back to the
-        ``created_at`` column) is at or after ``since``, newest first.
-        ``since`` accepts ISO datetime (naive = local time) or unix seconds.
+        Returns at most ``limit`` active, non-consolidated memories of one
+        session, newest first.  Consolidated summaries (written by the nightly
+        consolidation run, marked via ``metadata.consolidated_at``) are never
+        exposed — they span days/weeks and would only waste the sibling's
+        item budget.
+
+        When ``since`` is empty or unparseable no time bound is applied.
+        Otherwise only memories whose canonical create time
+        (``metadata.create_time``, falling back to the ``created_at`` column)
+        is at or after ``since`` are returned; ``since`` accepts ISO datetime
+        (naive = local time) or unix seconds.
         """
         db_path = getattr(self.memory_engine, "db_path", None)
-        cutoff = self._parse_since_value(since)
-        if not db_path or cutoff is None:
+        if not db_path:
             return []
+        cutoff = self._parse_since_value(since)
 
         capped = max(1, min(10, int(limit)))
         created_expr = (
             "COALESCE(CAST(json_extract(metadata, '$.create_time') AS REAL),"
             " CAST(created_at AS REAL), 0)"
         )
+        time_clause = f"AND {created_expr} >= ?" if cutoff is not None else ""
+        params: list[object] = [str(session_id or "")]
+        if cutoff is not None:
+            params.append(float(cutoff))
+        params.append(capped)
         try:
             async with sqlite_connection(db_path) as db:
                 db.row_factory = aiosqlite.Row
@@ -171,11 +183,12 @@ class EventHandler:
                     FROM documents
                     WHERE json_extract(metadata, '$.session_id') = ?
                       AND COALESCE(json_extract(metadata, '$.status'), 'active') = 'active'
-                      AND {created_expr} >= ?
+                      AND json_extract(metadata, '$.consolidated_at') IS NULL
+                      {time_clause}
                     ORDER BY {created_expr} DESC, id DESC
                     LIMIT ?
                     """,
-                    (str(session_id or ""), float(cutoff), capped),
+                    params,
                 )
                 rows = await cursor.fetchall()
         except Exception as exc:
@@ -190,7 +203,9 @@ class EventHandler:
             created_num = float(row["created_num"] or 0.0)
             results.append(
                 {
-                    "text": text[:400],
+                    # Interface-level safety cap only; callers truncate to
+                    # their own configured per-item budget.
+                    "text": text[:800],
                     "time": (
                         datetime.fromtimestamp(created_num).strftime("%Y-%m-%d %H:%M")
                         if created_num > 0
