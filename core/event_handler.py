@@ -265,9 +265,17 @@ class EventHandler:
             text = message.content_to_text(message.content).strip()
             if not text:
                 continue
+            # `name` carries the real display name so sibling plugins can keep
+            # the speaker's own name in their prompts. Without it they have to
+            # fall back to vague labels ("用户"/"角色"), which lets the model
+            # swap the two speakers when it rewrites the conversation.
             result.append(
                 {
                     "speaker": "assistant" if is_assistant else "user",
+                    "name": str(
+                        (message.sender_name or "").strip()
+                        or ("Bot" if is_assistant else "对方")
+                    )[:40],
                     "at": at.isoformat(),
                     "text": text[:800],
                 }

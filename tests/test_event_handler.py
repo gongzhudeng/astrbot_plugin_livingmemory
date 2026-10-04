@@ -139,11 +139,13 @@ async def test_attention_history_returns_only_private_messages_after_cutoff(hand
     assert history == [
         {
             "speaker": "user",
+            "name": "对方",
             "at": "2026-08-15T11:00:00+00:00",
             "text": "[图片消息]",
         },
         {
             "speaker": "assistant",
+            "name": "Bot",
             "at": "2026-08-15T11:00:00+00:00",
             "text": "[语音消息]",
         },
@@ -151,6 +153,79 @@ async def test_attention_history_returns_only_private_messages_after_cutoff(hand
     handler.conversation_manager.get_messages.assert_awaited_once_with(
         "s1", limit=600, use_cache=False
     )
+
+
+@pytest.mark.asyncio
+async def test_attention_history_carries_real_speaker_names(handler):
+    """v0.3.23: sibling plugins need the real display name, not a vague label.
+
+    EmotionState used to hardcode "用户"/"角色" for these speakers, which
+    stripped the nicknames before the model saw them and let it swap the two
+    speakers when rewriting a conversation into first-person facts.
+    """
+    from astrbot_plugin_livingmemory.core.models.conversation_models import Message
+
+    at = datetime(2026, 8, 15, 11, tzinfo=timezone.utc).timestamp()
+    handler.conversation_manager.get_messages = AsyncMock(
+        return_value=[
+            Message(
+                1,
+                "s1",
+                "user",
+                "今天我生日",
+                "u1",
+                sender_name="Mando",
+                timestamp=at,
+            ),
+            Message(
+                2,
+                "s1",
+                "assistant",
+                "生日快乐",
+                "bot",
+                sender_name="小怡",
+                timestamp=at,
+                metadata={"is_bot_message": True},
+            ),
+        ]
+    )
+
+    history = await handler.get_attention_history("s1", limit=100)
+
+    assert [row["name"] for row in history] == ["Mando", "小怡"]
+    assert [row["speaker"] for row in history] == ["user", "assistant"]
+
+
+@pytest.mark.asyncio
+async def test_attention_history_uses_fallback_label_when_name_missing(handler):
+    """A blank sender_name degrades to a stable label, never to an empty field.
+
+    An empty prefix would make the calling prompt read "...：", so the fallback
+    keeps the line parseable while still telling the model it has no real name.
+    """
+    from astrbot_plugin_livingmemory.core.models.conversation_models import Message
+
+    at = datetime(2026, 8, 15, 11, tzinfo=timezone.utc).timestamp()
+    handler.conversation_manager.get_messages = AsyncMock(
+        return_value=[
+            Message(1, "s1", "user", "无昵称", "u1", sender_name="", timestamp=at),
+            Message(
+                2,
+                "s1",
+                "assistant",
+                "无昵称回复",
+                "bot",
+                sender_name="",
+                timestamp=at,
+                metadata={"is_bot_message": True},
+            ),
+        ]
+    )
+
+    history = await handler.get_attention_history("s1", limit=100)
+
+    assert [row["name"] for row in history] == ["对方", "Bot"]
+    assert all(row["name"] for row in history)
 
 
 def _make_event(group: bool = False):
